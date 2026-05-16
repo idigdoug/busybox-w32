@@ -72,15 +72,15 @@
 
 /* Don't assume that UNICODE is not defined.  */
 # undef GetModuleHandle
-# define GetModuleHandle GetModuleHandleA
+# define GetModuleHandle GetModuleHandleW
 # undef PeekConsoleInput
-# define PeekConsoleInput PeekConsoleInputA
+# define PeekConsoleInput PeekConsoleInputW
 # undef CreateEvent
-# define CreateEvent CreateEventA
+# define CreateEvent CreateEventW
 # undef PeekMessage
-# define PeekMessage PeekMessageA
+# define PeekMessage PeekMessageW
 # undef DispatchMessage
-# define DispatchMessage DispatchMessageA
+# define DispatchMessage DispatchMessageW
 
 /* Do *not* use the function WSAPoll
    <https://docs.microsoft.com/en-us/windows/desktop/api/winsock2/nf-winsock2-wsapoll>
@@ -184,7 +184,7 @@ windows_compute_revents (HANDLE h, int *p_sought)
       if (!once_only)
         {
           NtQueryInformationFile = (PNtQueryInformationFile)
-            GetProcAddress (GetModuleHandle ("ntdll.dll"),
+            GetProcAddress (GetModuleHandleW (L"ntdll.dll"),
                             "NtQueryInformationFile");
           once_only = TRUE;
         }
@@ -494,7 +494,7 @@ poll (struct pollfd *pfd, nfds_t nfd, int timeout)
     }
 
   if (!hEvent)
-    hEvent = CreateEvent (NULL, FALSE, FALSE, NULL);
+    hEvent = CreateEventW (NULL, FALSE, FALSE, NULL);
 
 restart:
   /* How much is left to wait? */
@@ -587,10 +587,10 @@ restart:
         {
           /* new input of some other kind */
           BOOL bRet;
-          while ((bRet = PeekMessage (&msg, NULL, 0, 0, PM_REMOVE)) != 0)
+          while ((bRet = PeekMessageW (&msg, NULL, 0, 0, PM_REMOVE)) != 0)
             {
               TranslateMessage (&msg);
-              DispatchMessage (&msg);
+              DispatchMessageW (&msg);
             }
         }
       else

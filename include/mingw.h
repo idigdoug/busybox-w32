@@ -224,16 +224,20 @@ int mingw_system(const char *cmd) FAST_FUNC;
 #define system mingw_system
 
 int clearenv(void);
-char *mingw_getenv(const char *name) FAST_FUNC;
+char *mingw_getenv(const char *name, bool check_fallbacks) FAST_FUNC;
 int mingw_putenv(const char *env) FAST_FUNC;
+wchar_t *mingw_env_block(void);
+char **mingw_environ(void);
 char *mingw_mktemp(char *template) FAST_FUNC;
 int mkstemp(char *template);
 char *realpath(const char *path, char *resolved_path) FAST_FUNC;
 int setenv(const char *name, const char *value, int replace) FAST_FUNC;
 int unsetenv(const char *env) FAST_FUNC;
 
-#define getenv mingw_getenv
+#define getenv(name) mingw_getenv(name, true)
 #define putenv mingw_putenv
+#undef environ
+#define environ mingw_environ()
 #define mktemp mingw_mktemp
 
 /*
@@ -465,8 +469,10 @@ struct tm *localtime_r(const time_t *timep, struct tm *result) FAST_FUNC;
 char *strptime(const char *s, const char *format, struct tm *tm) FAST_FUNC;
 char *mingw_strptime(const char *s, const char *format, struct tm *tm, long *gmt) FAST_FUNC;
 size_t mingw_strftime(char *buf, size_t max, const char *format, const struct tm *tm) FAST_FUNC;
+void mingw_tzset(void);
 
 #define strftime mingw_strftime
+#define tzset mingw_tzset
 
 /*
  * times.h
@@ -557,6 +563,7 @@ int mingw_isatty(int fd) FAST_FUNC;
 #define getcwd mingw_getcwd
 #define lchown chown
 #define open mingw_open
+#define creat(path, mode) mingw_open((path), O_CREAT|O_WRONLY|O_TRUNC, (mode))
 #define close mingw_close
 #define unlink mingw_unlink
 #define rmdir mingw_rmdir

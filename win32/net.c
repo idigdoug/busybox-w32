@@ -54,7 +54,7 @@ int FAST_FUNC mingw_socket(int domain, int type, int protocol)
 	SOCKET s;
 
 	init_winsock();
-	s = WSASocket(domain, type, protocol, NULL, 0, 0);
+	s = WSASocketW(domain, type, protocol, NULL, 0, 0);
 	if (s == INVALID_SOCKET) {
 		/*
 		 * WSAGetLastError() values are regular BSD error codes

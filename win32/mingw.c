@@ -1,3 +1,5 @@
+#include <direct.h>
+#include <wchar.h>
 #include "libbb.h"
 #include <userenv.h>
 #include "lazyload.h"
@@ -231,6 +233,8 @@ int mingw_open (const char *filename, int oflags, ...)
 	va_list args;
 	int pmode, mode = 0666;
 	int fd;
+	wchar_t wbuf[PATH_MAX];
+	wcs_result wr;
 	// Special case: /dev/urandom and /dev/zero for internal use
 	int special = (oflags & O_SPECIAL);
 	int dev = get_dev_type(filename);
@@ -258,14 +262,20 @@ int mingw_open (const char *filename, int oflags, ...)
 
 	pmode = ((mode & S_IWUSR) ? _S_IWRITE : 0) |
 					((mode & S_IRUSR) ? _S_IREAD : 0);
+	wr = bb_to_wcs(filename, wbuf, sizeof(wbuf));
 
-	fd = open(filename, oflags&~O_SPECIAL, pmode);
+	fd = _wopen(wr.str, oflags&~O_SPECIAL, pmode);
 	if (fd >= 0) {
 		update_special_fd(dev, fd);
 	}
 	else if ((oflags & O_ACCMODE) != O_RDONLY && errno == EACCES) {
 		if (mingw_is_directory(filename))
 			errno = EISDIR;
+	}
+	{
+		int saved_errno = errno;
+		wcs_free(&wr);
+		errno = saved_errno;
 	}
 	return fd;
 }
@@ -296,6 +306,10 @@ FILE * FAST_FUNC mingw_fopen (const char *filename, const char *otype)
 {
 	int fd;
 	FILE *stream;
+	wchar_t wbuf[PATH_MAX];
+	wchar_t wotype[20];
+	wcs_result wr;
+	wcs_result wr_otype;
 	int dev = get_dev_type(filename);
 
 	if (dev == DEV_NULL)
@@ -311,10 +325,18 @@ FILE * FAST_FUNC mingw_fopen (const char *filename, const char *otype)
 		return fd == -1 ? NULL : fdopen(fd, "rb");
 	} else if ((fd=get_dev_fd(filename)) >= 0)
 		return fdopen(fd, otype);
-	stream = fopen(filename, otype);
+	wr = bb_to_wcs(filename, wbuf, sizeof(wbuf));
+	wr_otype = bb_to_wcs(otype, wotype, sizeof(wotype));
+	stream = _wfopen(wr.str, wr_otype.str);
 	if (stream == NULL && errno == EACCES && strcmp(otype, "r") == 0 &&
 			mingw_is_directory(filename))
 		errno = EISDIR;
+	{
+		int saved_errno = errno;
+		wcs_free(&wr_otype);
+		wcs_free(&wr);
+		errno = saved_errno;
+	}
 	return stream;
 }
 
@@ -406,6 +428,9 @@ static int get_file_attr(const char *fname, WIN32_FILE_ATTRIBUTE_DATA *fdata)
 {
 	char *want_dir;
 	int dev = get_dev_type(fname);
+	int ret;
+	wchar_t wbuf[PATH_MAX];
+	wcs_result wr;
 
 #if !ENABLE_DD
 	// /dev/urandom and /dev/zero aren't supported without dd
@@ -422,18 +447,23 @@ static int get_file_attr(const char *fname, WIN32_FILE_ATTRIBUTE_DATA *fdata)
 	}
 
 	want_dir = last_char_is_dir_sep(fname);
-	if (GetFileAttributesExA(fname, GetFileExInfoStandard, fdata)) {
+	wr = bb_to_wcs(fname, wbuf, sizeof(wbuf));
+	if (GetFileAttributesExW(wr.str, GetFileExInfoStandard, fdata)) {
 		if (!(fdata->dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) && want_dir)
-			return ENOTDIR;
-		fdata->dwFileAttributes &= ~FILE_ATTRIBUTE_DEVICE;
-		return 0;
+			ret = ENOTDIR;
+		else {
+			fdata->dwFileAttributes &= ~FILE_ATTRIBUTE_DEVICE;
+			ret = 0;
+		}
+		wcs_free(&wr);
+		return ret;
 	}
 
 	if (GetLastError() == ERROR_SHARING_VIOLATION) {
 		HANDLE hnd;
-		WIN32_FIND_DATA fd;
+		WIN32_FIND_DATAW fd;
 
-		if ((hnd=FindFirstFile(fname, &fd)) != INVALID_HANDLE_VALUE) {
+		if ((hnd=FindFirstFileW(wr.str, &fd)) != INVALID_HANDLE_VALUE) {
 			fdata->dwFileAttributes =
 					fd.dwFileAttributes & ~FILE_ATTRIBUTE_DEVICE;
 			fdata->ftCreationTime = fd.ftCreationTime;
@@ -442,6 +472,7 @@ static int get_file_attr(const char *fname, WIN32_FILE_ATTRIBUTE_DATA *fdata)
 			fdata->nFileSizeHigh = fd.nFileSizeHigh;
 			fdata->nFileSizeLow = fd.nFileSizeLow;
 			FindClose(hnd);
+			wcs_free(&wr);
 			return 0;
 		}
 	}
@@ -451,17 +482,23 @@ static int get_file_attr(const char *fname, WIN32_FILE_ATTRIBUTE_DATA *fdata)
 	case ERROR_SHARING_VIOLATION:
 	case ERROR_LOCK_VIOLATION:
 	case ERROR_SHARING_BUFFER_EXCEEDED:
-		return EACCES;
+		ret = EACCES;
+		break;
 	case ERROR_BUFFER_OVERFLOW:
-		return ENAMETOOLONG;
+		ret = ENAMETOOLONG;
+		break;
 	case ERROR_NOT_ENOUGH_MEMORY:
-		return ENOMEM;
+		ret = ENOMEM;
+		break;
 	case ERROR_INVALID_NAME:
-		if (want_dir)
-			return ENOTDIR;
+		ret = want_dir ? ENOTDIR : ENOENT;
+		break;
 	default:
-		return ENOENT;
+		ret = ENOENT;
+		break;
 	}
+	wcs_free(&wr);
+	return ret;
 }
 
 #undef umask
@@ -492,14 +529,18 @@ static int has_exec_format(const char *name)
 	int sig;
 	unsigned int offset;
 	unsigned char buf[1024];
+	wchar_t wbuf[PATH_MAX];
+	wcs_result wr;
 
 	/* special case: skip DLLs, there are thousands of them! */
 	if (is_suffixed_with_case(name, ".dll"))
 		return 0;
 
 	/* Open file and try to avoid updating access time */
-	fh = CreateFileA(name, GENERIC_READ | FILE_WRITE_ATTRIBUTES,
+	wr = bb_to_wcs(name, wbuf, sizeof(wbuf));
+	fh = CreateFileW(wr.str, GENERIC_READ | FILE_WRITE_ATTRIBUTES,
 						FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
+	wcs_free(&wr);
 	if (fh != INVALID_HANDLE_VALUE) {
 		FILETIME last_access = { 0xffffffff, 0xffffffff };
 
@@ -650,21 +691,27 @@ static uid_t file_owner(HANDLE fh, struct mingw_stat *buf)
 #endif
 
 static DWORD get_symlink_data(DWORD attr, const char *pathname,
-					WIN32_FIND_DATAA *fbuf)
+					WIN32_FIND_DATAW *fbuf)
 {
 	if (attr & FILE_ATTRIBUTE_REPARSE_POINT) {
-		HANDLE handle = FindFirstFileA(pathname, fbuf);
+		wchar_t wbuf[PATH_MAX];
+		wcs_result wr = bb_to_wcs(pathname, wbuf, sizeof(wbuf));
+		HANDLE handle = FindFirstFileW(wr.str, fbuf);
 		if (handle != INVALID_HANDLE_VALUE) {
 			FindClose(handle);
 			if ((fbuf->dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT)) {
-				switch (fbuf->dwReserved0) {
+				DWORD tag = fbuf->dwReserved0;
+				wcs_free(&wr);
+				switch (tag) {
 				case IO_REPARSE_TAG_SYMLINK:
 				case IO_REPARSE_TAG_MOUNT_POINT:
 				case IO_REPARSE_TAG_APPEXECLINK:
-					return fbuf->dwReserved0;
+					return tag;
 				}
+				return 0;
 			}
 		}
+		wcs_free(&wr);
 	}
 	return 0;
 }
@@ -672,7 +719,7 @@ static DWORD get_symlink_data(DWORD attr, const char *pathname,
 static DWORD is_symlink(const char *pathname)
 {
 	WIN32_FILE_ATTRIBUTE_DATA fdata;
-	WIN32_FIND_DATAA fbuf;
+	WIN32_FIND_DATAW fbuf;
 
 	if (!get_file_attr(pathname, &fdata))
 		return get_symlink_data(fdata.dwFileAttributes, pathname, &fbuf);
@@ -730,7 +777,7 @@ static int do_lstat(int follow, const char *file_name, struct mingw_stat *buf)
 {
 	int err;
 	WIN32_FILE_ATTRIBUTE_DATA fdata;
-	WIN32_FIND_DATAA findbuf;
+	WIN32_FIND_DATAW findbuf;
 	DWORD low, high;
 	off64_t size;
 	char *lname = NULL;
@@ -786,11 +833,14 @@ static int do_lstat(int follow, const char *file_name, struct mingw_stat *buf)
 			DWORD flags;
 			HANDLE fh;
 			BY_HANDLE_FILE_INFORMATION hdata;
+			wchar_t wbuf[PATH_MAX];
+			wcs_result wr;
 
 			flags = FILE_FLAG_BACKUP_SEMANTICS;
 			if (S_ISLNK(buf->st_mode))
 				flags |= FILE_FLAG_OPEN_REPARSE_POINT;
-			fh = CreateFile(file_name, READ_CONTROL, 0, NULL,
+			wr = bb_to_wcs(file_name, wbuf, sizeof(wbuf));
+			fh = CreateFileW(wr.str, READ_CONTROL, 0, NULL,
 								OPEN_EXISTING, flags, NULL);
 			if (fh != INVALID_HANDLE_VALUE) {
 				if (GetFileInformationByHandle(fh, &hdata)) {
@@ -807,6 +857,7 @@ static int do_lstat(int follow, const char *file_name, struct mingw_stat *buf)
 				buf->st_uid = buf->st_gid = 0;
 				buf->st_mode &= ~S_IRWXO;
 			}
+			wcs_free(&wr);
 		}
 #endif
 
@@ -814,10 +865,13 @@ static int do_lstat(int follow, const char *file_name, struct mingw_stat *buf)
 		 * files need to be considered. */
 		size = buf->st_size;
 		if (S_ISREG(buf->st_mode)) {
-			low = GetCompressedFileSize(file_name, &high);
+			wchar_t wbuf[PATH_MAX];
+			wcs_result wr = bb_to_wcs(file_name, wbuf, sizeof(wbuf));
+			low = GetCompressedFileSizeW(wr.str, &high);
 			if (low != INVALID_FILE_SIZE || GetLastError() == NO_ERROR) {
 				size = low | (((off64_t)high)<<32);
 			}
+			wcs_free(&wr);
 		}
 
 		/*
@@ -826,6 +880,7 @@ static int do_lstat(int follow, const char *file_name, struct mingw_stat *buf)
 		 */
 		buf->st_blksize = 4096;
 		buf->st_blocks = ((size+4095)>>12)<<3;
+		free(lname);
 		return 0;
 	}
 	free(lname);
@@ -981,8 +1036,13 @@ int FAST_FUNC utimensat(int fd, const char *path,
 	if (flags & AT_SYMLINK_NOFOLLOW)
 		cflag |= FILE_FLAG_OPEN_REPARSE_POINT;
 
-	fh = CreateFile(path, FILE_WRITE_ATTRIBUTES, 0, NULL, OPEN_EXISTING,
-					cflag, NULL);
+	{
+		wchar_t wpath_buf[PATH_MAX];
+		wcs_result wr = bb_to_wcs(path, wpath_buf, sizeof(wpath_buf));
+		fh = CreateFileW(wr.str, FILE_WRITE_ATTRIBUTES, 0, NULL, OPEN_EXISTING,
+						cflag, NULL);
+		wcs_free(&wr);
+	}
 	if (fh == INVALID_HANDLE_VALUE) {
 		errno = err_win_to_posix();
 		return rc;
@@ -1042,19 +1102,49 @@ int FAST_FUNC nanosleep(const struct timespec *req, struct timespec *rem)
 #undef mktemp
 char * FAST_FUNC mingw_mktemp(char *template)
 {
-	if ( mktemp(template) == NULL ) {
-		template[0] = '\0';
-	}
+	wchar_t wbuf[PATH_MAX];
+	mbs_result mr;
+	wcs_result wr = bb_to_wcs(template, wbuf, sizeof(wbuf));
 
+	if (_wmktemp(wr.str) == NULL) {
+		int saved_errno = errno;
+		template[0] = '\0';
+		wcs_free(&wr);
+		errno = saved_errno;
+		return template;
+	}
+	mr = bb_to_mbs(wr.str, NULL, 0);
+	if (mr.str)
+		strcpy(template, mr.str);
+	mbs_free(&mr);
+	wcs_free(&wr);
 	return template;
 }
 
 int mkstemp(char *template)
 {
-	char *filename = mktemp(template);
-	if (filename == NULL)
+	int fd;
+	wchar_t wbuf[PATH_MAX];
+	mbs_result mr;
+	wcs_result wr = bb_to_wcs(template, wbuf, sizeof(wbuf));
+
+	if (_wmktemp(wr.str) == NULL) {
+		int saved_errno = errno;
+		wcs_free(&wr);
+		errno = saved_errno;
 		return -1;
-	return open(filename, O_RDWR | O_CREAT, 0600);
+	}
+	mr = bb_to_mbs(wr.str, NULL, 0);
+	if (mr.str)
+		strcpy(template, mr.str);
+	fd = _wopen(wr.str, O_RDWR | O_CREAT, 0600);
+	mbs_free(&mr);
+	{
+		int saved_errno = errno;
+		wcs_free(&wr);
+		errno = saved_errno;
+	}
+	return fd;
 }
 
 int gettimeofday(struct timeval *tv, void *tz UNUSED_PARAM)
@@ -1144,45 +1234,80 @@ struct tm * FAST_FUNC localtime_r(const time_t *timep, struct tm *result)
 #undef getcwd
 char * FAST_FUNC mingw_getcwd(char *pointer, int len)
 {
-	char *ret = getcwd(pointer, len);
+	wchar_t wbuf[PATH_MAX];
+	mbs_result mr;
+	wchar_t *ret = _wgetcwd(wbuf, PATH_MAX);
+
 	if (!ret)
-		return ret;
-	return bs_to_slash(ret);
+		return NULL;
+	mr = bb_to_mbs(ret, NULL, 0);
+	if (!mr.str)
+		return NULL;
+	if ((int)strlen(mr.str) >= len) {
+		mbs_free(&mr);
+		errno = ERANGE;
+		return NULL;
+	}
+	strcpy(pointer, mr.str);
+	mbs_free(&mr);
+	return bs_to_slash(pointer);
 }
 
 #undef rename
 int FAST_FUNC mingw_rename(const char *pold, const char *pnew)
 {
 	DWORD attrs;
+	wchar_t wold[PATH_MAX];
+	wchar_t wnew[PATH_MAX];
+	wcs_result wr_old = bb_to_wcs(pold, wold, sizeof(wold));
+	wcs_result wr_new = bb_to_wcs(pnew, wnew, sizeof(wnew));
 
 	/*
 	 * For non-symlinks, try native rename() first to get errno right.
 	 * It is based on MoveFile(), which cannot overwrite existing files.
 	 */
 	if (!is_symlink(pold)) {
-		if (!rename(pold, pnew))
+		if (!_wrename(wr_old.str, wr_new.str)) {
+			wcs_free(&wr_new);
+			wcs_free(&wr_old);
 			return 0;
-		if (errno != EEXIST)
+		}
+		if (errno != EEXIST) {
+			int saved_errno = errno;
+			wcs_free(&wr_new);
+			wcs_free(&wr_old);
+			errno = saved_errno;
 			return -1;
+		}
 	}
-	if (MoveFileEx(pold, pnew,
-				MOVEFILE_REPLACE_EXISTING | MOVEFILE_COPY_ALLOWED))
+	if (MoveFileExW(wr_old.str, wr_new.str,
+				MOVEFILE_REPLACE_EXISTING | MOVEFILE_COPY_ALLOWED)) {
+		wcs_free(&wr_new);
+		wcs_free(&wr_old);
 		return 0;
+	}
 	/* TODO: translate more errors */
 	if (GetLastError() == ERROR_ACCESS_DENIED &&
-	    (attrs = GetFileAttributes(pnew)) != INVALID_FILE_ATTRIBUTES) {
+	    (attrs = GetFileAttributesW(wr_new.str)) != INVALID_FILE_ATTRIBUTES) {
 		if (attrs & FILE_ATTRIBUTE_DIRECTORY) {
+			wcs_free(&wr_new);
+			wcs_free(&wr_old);
 			errno = EISDIR;
 			return -1;
 		}
 		if ((attrs & FILE_ATTRIBUTE_READONLY) &&
-		    SetFileAttributes(pnew, attrs & ~FILE_ATTRIBUTE_READONLY)) {
-			if (MoveFileEx(pold, pnew, MOVEFILE_REPLACE_EXISTING))
+		    SetFileAttributesW(wr_new.str, attrs & ~FILE_ATTRIBUTE_READONLY)) {
+			if (MoveFileExW(wr_old.str, wr_new.str, MOVEFILE_REPLACE_EXISTING)) {
+				wcs_free(&wr_new);
+				wcs_free(&wr_old);
 				return 0;
+			}
 			/* revert file attributes on failure */
-			SetFileAttributes(pnew, attrs);
+			SetFileAttributesW(wr_new.str, attrs);
 		}
 	}
+	wcs_free(&wr_new);
+	wcs_free(&wr_old);
 	errno = EACCES;
 	return -1;
 }
@@ -1190,17 +1315,23 @@ int FAST_FUNC mingw_rename(const char *pold, const char *pnew)
 static char *gethomedir(void)
 {
 	static char *buf = NULL;
-	DECLARE_PROC_ADDR(BOOL, GetUserProfileDirectoryA, HANDLE, LPSTR, LPDWORD);
+	DECLARE_PROC_ADDR(BOOL, GetUserProfileDirectoryW, HANDLE, LPWSTR, LPDWORD);
 
 	if (!buf) {
 		DWORD len = PATH_MAX;
 		HANDLE h;
+		wchar_t wbuf[PATH_MAX];
 
-		buf = xzalloc(len);
+		buf = xzalloc(PATH_MAX * 4);
 		if (OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &h)) {
-			if (INIT_PROC_ADDR(userenv.dll, GetUserProfileDirectoryA)) {
-				GetUserProfileDirectoryA(h, buf, &len);
-				bs_to_slash(buf);
+			if (INIT_PROC_ADDR(userenv.dll, GetUserProfileDirectoryW) &&
+			    GetUserProfileDirectoryW(h, wbuf, &len)) {
+				mbs_result mr = bb_to_mbs(wbuf, NULL, 0);
+				if (mr.str) {
+					strcpy(buf, mr.str);
+					mbs_free(&mr);
+					bs_to_slash(buf);
+				}
 			}
 			CloseHandle(h);
 		}
@@ -1213,18 +1344,26 @@ char *get_user_name(void)
 {
 	static char *user_name = NULL;
 	char *s;
+	wchar_t wname[NAME_LEN];
 	DWORD len = NAME_LEN;
 
 	if ( user_name == NULL ) {
-		user_name = xzalloc(NAME_LEN);
+		user_name = xzalloc(NAME_LEN * 4);
 	}
 
 	if ( user_name[0] != '\0' ) {
 		return user_name;
 	}
 
-	if ( !GetUserName(user_name, &len) ) {
+	if ( !GetUserNameW(wname, &len) ) {
 		return NULL;
+	}
+	{
+		mbs_result mr = bb_to_mbs(wname, NULL, 0);
+		if (!mr.str)
+			return NULL;
+		strcpy(user_name, mr.str);
+		mbs_free(&mr);
 	}
 
 	for ( s=user_name; *s; ++s ) {
@@ -1399,17 +1538,28 @@ clock_t FAST_FUNC times(struct tms *buf)
 
 int link(const char *oldpath, const char *newpath)
 {
-	DECLARE_PROC_ADDR(BOOL, CreateHardLinkA, LPCSTR, LPCSTR,
+	wchar_t wold[PATH_MAX];
+	wchar_t wnew[PATH_MAX];
+	wcs_result wr_old;
+	wcs_result wr_new;
+	DECLARE_PROC_ADDR(BOOL, CreateHardLinkW, LPCWSTR, LPCWSTR,
 						LPSECURITY_ATTRIBUTES);
 
-	if (!INIT_PROC_ADDR(kernel32.dll, CreateHardLinkA)) {
+	if (!INIT_PROC_ADDR(kernel32.dll, CreateHardLinkW)) {
 		errno = ENOSYS;
 		return -1;
 	}
-	if (!CreateHardLinkA(newpath, oldpath, NULL)) {
-		errno = err_win_to_posix();
+	wr_old = bb_to_wcs(oldpath, wold, sizeof(wold));
+	wr_new = bb_to_wcs(newpath, wnew, sizeof(wnew));
+	if (!CreateHardLinkW(wr_new.str, wr_old.str, NULL)) {
+		int saved_errno = err_win_to_posix();
+		wcs_free(&wr_new);
+		wcs_free(&wr_old);
+		errno = saved_errno;
 		return -1;
 	}
+	wcs_free(&wr_new);
+	wcs_free(&wr_old);
 	return 0;
 }
 
@@ -1423,10 +1573,14 @@ int link(const char *oldpath, const char *newpath)
 int symlink(const char *target, const char *linkpath)
 {
 	DWORD flag = SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE;
-	DECLARE_PROC_ADDR(BOOLEAN, CreateSymbolicLinkA, LPCSTR, LPCSTR, DWORD);
+	DECLARE_PROC_ADDR(BOOLEAN, CreateSymbolicLinkW, LPCWSTR, LPCWSTR, DWORD);
 	char *targ, *relative = NULL;
+	wchar_t wlink[PATH_MAX];
+	wchar_t wtarg[PATH_MAX];
+	wcs_result wr_link;
+	wcs_result wr_targ;
 
-	if (!INIT_PROC_ADDR(kernel32.dll, CreateSymbolicLinkA)) {
+	if (!INIT_PROC_ADDR(kernel32.dll, CreateSymbolicLinkW)) {
 		errno = ENOSYS;
 		return -1;
 	}
@@ -1444,9 +1598,11 @@ int symlink(const char *target, const char *linkpath)
 
 	targ = auto_string(strdup(target));
 	slash_to_bs(targ);
+	wr_link = bb_to_wcs(linkpath, wlink, sizeof(wlink));
+	wr_targ = bb_to_wcs(targ, wtarg, sizeof(wtarg));
 
  retry:
-	if (!CreateSymbolicLinkA(linkpath, targ, flag)) {
+	if (!CreateSymbolicLinkW(wr_link.str, wr_targ.str, flag)) {
 		/* Old Windows versions see 'UNPRIVILEGED_CREATE' as an invalid
 		 * parameter.  Retry without it. */
 		if ((flag & SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE) &&
@@ -1454,9 +1610,16 @@ int symlink(const char *target, const char *linkpath)
 			flag &= ~SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE;
 			goto retry;
 		}
-		errno = err_win_to_posix();
+		{
+			int saved_errno = err_win_to_posix();
+			wcs_free(&wr_targ);
+			wcs_free(&wr_link);
+			errno = saved_errno;
+		}
 		return -1;
 	}
+	wcs_free(&wr_targ);
+	wcs_free(&wr_link);
 	return 0;
 }
 
@@ -1507,19 +1670,20 @@ static REPARSE_DATA_BUFFER *make_junction_data_buffer(char *rpath)
 	WCHAR pbuf[PATH_MAX];
 	int plen, slen, rbufsize;
 	REPARSE_DATA_BUFFER *rptr;
+	wcs_result wr;
 
 	/* We need two strings for the reparse data.  The PrintName is the
 	 * target path in Win32 format, the SubstituteName is the same in
 	 * NT format.
 	 *
-	 * The return value from MultiByteToWideChar includes the trailing
-	 * L'\0' character.
+	 * The return value includes the trailing L'\0' character.
 	 */
 	slash_to_bs(rpath);
-	plen = MultiByteToWideChar(CP_ACP, 0, rpath, -1, pbuf, PATH_MAX);
-	if (plen == 0) {
-		errno = err_win_to_posix();
-		return NULL;
+	wr = bb_to_wcs(rpath, pbuf, sizeof(pbuf));
+	plen = wcslen(wr.str) + 1;
+	if (wr.str != pbuf) {
+		wcscpy(pbuf, wr.str);
+		wcs_free(&wr);
 	}
 	slen = plen + 4;
 
@@ -1550,6 +1714,8 @@ int FAST_FUNC create_junction(const char *oldpath, const char *newpath)
 	HANDLE h;
 	int error = 0;
 	DWORD bytes;
+	wchar_t wnew[PATH_MAX];
+	wcs_result wr_new;
 
 	if (realpath(oldpath, rpath) == NULL || stat(rpath, &statbuf) < 0)
 		return -1;
@@ -1573,7 +1739,8 @@ int FAST_FUNC create_junction(const char *oldpath, const char *newpath)
 		return -1;
 	}
 
-	h = CreateFileA(newpath, GENERIC_READ | GENERIC_WRITE, 0, NULL,
+	wr_new = bb_to_wcs(newpath, wnew, sizeof(wnew));
+	h = CreateFileW(wr_new.str, GENERIC_READ | GENERIC_WRITE, 0, NULL,
 			OPEN_EXISTING,
 			FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS, NULL);
 	if (h != INVALID_HANDLE_VALUE) {
@@ -1581,6 +1748,7 @@ int FAST_FUNC create_junction(const char *oldpath, const char *newpath)
 				rptr->ReparseDataLength + REPARSE_DATA_BUFFER_HEADER_SIZE,
 				NULL, 0, &bytes, NULL) != 0) {
 			CloseHandle(h);
+			wcs_free(&wr_new);
 			free(rptr);
 			return 0;
 		}
@@ -1590,51 +1758,46 @@ int FAST_FUNC create_junction(const char *oldpath, const char *newpath)
 		error = err_win_to_posix();
 	}
 
+	wcs_free(&wr_new);
 	rmdir(newpath);
 	free(rptr);
 	errno = error;
 	return -1;
 }
 
-static char *normalize_ntpathA(char *buf)
-{
-	/* fix absolute path prefixes */
-	if (buf[0] == '\\') {
-		/* strip NT namespace prefixes */
-		if (is_prefixed_with(buf, "\\??\\") ||
-				is_prefixed_with(buf, "\\\\?\\"))
-			buf += 4;
-		else if (is_prefixed_with_case(buf, "\\DosDevices\\"))
-			buf += 12;
-		/* replace remaining '...UNC\' with '\\' */
-		if (is_prefixed_with_case(buf, "UNC\\")) {
-			buf += 2;
-			*buf = '\\';
-		}
-	}
-	return buf;
-}
+static wchar_t *normalize_ntpath(wchar_t *wbuf);
 
 static char *resolve_symlinks(char *path)
 {
-	HANDLE h;
+	HANDLE h = INVALID_HANDLE_VALUE;
 	DWORD status;
 	char *ptr = NULL;
-	DECLARE_PROC_ADDR(DWORD, GetFinalPathNameByHandleA, HANDLE,
-						LPSTR, DWORD, DWORD);
+	DECLARE_PROC_ADDR(DWORD, GetFinalPathNameByHandleW, HANDLE,
+						LPWSTR, DWORD, DWORD);
 	char *resolve = NULL;
+	wchar_t wpath[PATH_MAX];
+	wchar_t wresult[MAX_PATH];
+	wcs_result wr_path = bb_to_wcs(path, wpath, sizeof(wpath));
 
-	if (GetFileAttributesA(path) & FILE_ATTRIBUTE_REPARSE_POINT) {
+	if (GetFileAttributesW(wr_path.str) & FILE_ATTRIBUTE_REPARSE_POINT) {
 		resolve = xmalloc_follow_symlinks(path);
-		if (!resolve)
+		if (!resolve) {
+			wcs_free(&wr_path);
 			return NULL;
+		}
 	}
+	wcs_free(&wr_path);
 
 	/* need a file handle to resolve symlinks */
-	h = CreateFileA(resolve ?: path, 0, 0, NULL, OPEN_EXISTING,
-				FILE_FLAG_BACKUP_SEMANTICS, NULL);
+	{
+		wchar_t wopen[PATH_MAX];
+		wcs_result wr_open = bb_to_wcs(resolve ?: path, wopen, sizeof(wopen));
+		h = CreateFileW(wr_open.str, 0, 0, NULL, OPEN_EXISTING,
+					FILE_FLAG_BACKUP_SEMANTICS, NULL);
+		wcs_free(&wr_open);
+	}
 	if (h != INVALID_HANDLE_VALUE) {
-		if (!INIT_PROC_ADDR(kernel32.dll, GetFinalPathNameByHandleA)) {
+		if (!INIT_PROC_ADDR(kernel32.dll, GetFinalPathNameByHandleW)) {
 			if (resolve)
 				strcpy(path, resolve);
 			ptr = path;
@@ -1642,11 +1805,16 @@ static char *resolve_symlinks(char *path)
 		}
 
 		/* normalize the path and return it on success */
-		status = GetFinalPathNameByHandleA(h, path, MAX_PATH,
+		status = GetFinalPathNameByHandleW(h, wresult, MAX_PATH,
 							FILE_NAME_NORMALIZED|VOLUME_NAME_DOS);
 		if (status != 0 && status < MAX_PATH) {
-			ptr = normalize_ntpathA(path);
-			goto end;
+			mbs_result mr = bb_to_mbs(normalize_ntpath(wresult), NULL, 0);
+			if (mr.str) {
+				strcpy(path, mr.str);
+				mbs_free(&mr);
+				ptr = path;
+				goto end;
+			}
 		} else if (err_win_to_posix() == ENOSYS) {
 			if (resolve)
 				strcpy(path, resolve);
@@ -1657,7 +1825,8 @@ static char *resolve_symlinks(char *path)
 
 	errno = err_win_to_posix();
  end:
-	CloseHandle(h);
+	if (h != INVALID_HANDLE_VALUE)
+		CloseHandle(h);
 	free(resolve);
 	return ptr;
 }
@@ -1669,12 +1838,16 @@ static char *resolve_symlinks(char *path)
  *   resulting path may not refer to an actual file.
  *
  * - resolve_symlinks checks that the file exists (by opening it) and
- *   resolves symlinks by calling GetFinalPathNameByHandleA.
+ *   resolves symlinks by calling GetFinalPathNameByHandleW.
  */
 char * FAST_FUNC realpath(const char *path, char *resolved_path)
 {
-	char buffer[MAX_PATH];
+	char buffer[MAX_PATH * 4];
 	char *real_path, *p;
+	wchar_t wpath[MAX_PATH];
+	wchar_t wbuffer[MAX_PATH];
+	wcs_result wr_path;
+	mbs_result mr;
 
 	/* enforce glibc pre-2.3 behaviour */
 	if (path == NULL || resolved_path == NULL) {
@@ -1682,14 +1855,24 @@ char * FAST_FUNC realpath(const char *path, char *resolved_path)
 		return NULL;
 	}
 
-	if (_fullpath(buffer, path, MAX_PATH) &&
-			(real_path=resolve_symlinks(buffer))) {
-		bs_to_slash(strcpy(resolved_path, real_path));
-		p = last_char_is(resolved_path, '/');
-		if (p && p > resolved_path && p[-1] != ':')
-			*p = '\0';
-		return resolved_path;
+	wr_path = bb_to_wcs(path, wpath, sizeof(wpath));
+	if (_wfullpath(wbuffer, wr_path.str, MAX_PATH)) {
+		mr = bb_to_mbs(wbuffer, NULL, 0);
+		wcs_free(&wr_path);
+		if (!mr.str)
+			return NULL;
+		strcpy(buffer, mr.str);
+		mbs_free(&mr);
+		if ((real_path=resolve_symlinks(buffer))) {
+			bs_to_slash(strcpy(resolved_path, real_path));
+			p = last_char_is(resolved_path, '/');
+			if (p && p > resolved_path && p[-1] != ':')
+				*p = '\0';
+			return resolved_path;
+		}
+		return NULL;
 	}
+	wcs_free(&wr_path);
 	return NULL;
 }
 
@@ -1738,10 +1921,10 @@ typedef struct {
 char * FAST_FUNC xmalloc_readlink(const char *pathname)
 {
 	HANDLE h;
-	char *buf;
-	int bufsiz;
+	wchar_t wbuf[PATH_MAX];
+	wcs_result wr = bb_to_wcs(pathname, wbuf, sizeof(wbuf));
 
-	h = CreateFile(pathname, 0, 0, NULL, OPEN_EXISTING,
+	h = CreateFileW(wr.str, 0, 0, NULL, OPEN_EXISTING,
 				FILE_FLAG_OPEN_REPARSE_POINT|FILE_FLAG_BACKUP_SEMANTICS, NULL);
 	if (h != INVALID_HANDLE_VALUE) {
 		DWORD nbytes;
@@ -1781,18 +1964,21 @@ char * FAST_FUNC xmalloc_readlink(const char *pathname)
 		}
 
 		if (name) {
+			mbs_result mr;
 			name[len] = 0;
 			name = normalize_ntpath(name);
-			bufsiz = WideCharToMultiByte(CP_ACP, 0, name, -1, NULL, 0, 0, 0);
-			if (bufsiz) {
-				buf = xmalloc(bufsiz);
-				if (WideCharToMultiByte(CP_ACP, 0, name, -1, buf, bufsiz, 0, 0))
-					return buf;
-				free(buf);
+			mr = bb_to_mbs(name, NULL, 0);
+			if (mr.str) {
+				wcs_free(&wr);
+				return mr.str;
 			}
 		}
 	}
-	errno = err_win_to_posix();
+	{
+		int saved_errno = err_win_to_posix();
+		wcs_free(&wr);
+		errno = saved_errno;
+	}
 	return NULL;
 }
 
@@ -1801,12 +1987,19 @@ const char *get_busybox_exec_path(void)
 	static char *path = NULL;
 
 	if (!path) {
-		path = xzalloc(PATH_MAX);
+		path = xzalloc(PATH_MAX * 4);
 	}
 
 	if (!*path) {
-		GetModuleFileName(NULL, path, PATH_MAX);
-		bs_to_slash(path);
+		wchar_t wpath[PATH_MAX];
+		mbs_result mr;
+		GetModuleFileNameW(NULL, wpath, PATH_MAX);
+		mr = bb_to_mbs(wpath, NULL, 0);
+		if (mr.str) {
+			strcpy(path, mr.str);
+			mbs_free(&mr);
+			bs_to_slash(path);
+		}
 	}
 	return path;
 }
@@ -1817,19 +2010,21 @@ int FAST_FUNC mingw_mkdir(const char *path, int mode UNUSED_PARAM)
 	int ret;
 	struct stat st;
 	int lerrno = 0;
+	wchar_t wbuf[PATH_MAX];
+	wcs_result wr = bb_to_wcs(path, wbuf, sizeof(wbuf));
 
-	if ( (ret=mkdir(path)) < 0 ) {
+	if ( (ret=_wmkdir(wr.str)) < 0 ) {
 		lerrno = errno;
 		if ( lerrno == EACCES && stat(path, &st) == 0 ) {
 			lerrno = EEXIST;
 		}
 	}
 
+	wcs_free(&wr);
 	errno = lerrno;
 	return ret;
 }
 
-#undef chdir
 int FAST_FUNC mingw_chdir(const char *dirname)
 {
 	int ret = -1;
@@ -1841,21 +2036,39 @@ int FAST_FUNC mingw_chdir(const char *dirname)
 		realdir = xstrdup(dirname);
 
 	if (realdir) {
+		wchar_t wbuf[PATH_MAX];
+		wcs_result wr;
 		fix_path_case(realdir);
-		ret = chdir(realdir);
+		wr = bb_to_wcs(realdir, wbuf, sizeof(wbuf));
+		ret = _wchdir(wr.str);
+		{
+			int saved_errno = errno;
+			wcs_free(&wr);
+			errno = saved_errno;
+		}
 	}
 	free(realdir);
 
 	return ret;
 }
 
-#undef chmod
 int FAST_FUNC mingw_chmod(const char *path, int mode)
 {
+	int ret;
+	wchar_t wbuf[PATH_MAX];
+	wcs_result wr;
+
 	if (mingw_is_directory(path))
 		mode |= 0222;
 
-	return chmod(path, mode);
+	wr = bb_to_wcs(path, wbuf, sizeof(wbuf));
+	ret = _wchmod(wr.str, mode);
+	{
+		int saved_errno = errno;
+		wcs_free(&wr);
+		errno = saved_errno;
+	}
+	return ret;
 }
 
 int fcntl(int fd, int cmd, ...)
@@ -1901,22 +2114,33 @@ int fcntl(int fd, int cmd, ...)
 	return result;
 }
 
-#undef unlink
-#undef rmdir
 int FAST_FUNC mingw_unlink(const char *pathname)
 {
 	int ret;
+	wchar_t wbuf[PATH_MAX];
+	wcs_result wr;
 
 	/* read-only files cannot be removed */
 	chmod(pathname, 0666);
 
-	ret = unlink(pathname);
+	wr = bb_to_wcs(pathname, wbuf, sizeof(wbuf));
+	ret = _wunlink(wr.str);
 	if (ret == -1 && errno == EACCES) {
 		/* a symlink to a directory needs to be removed by calling rmdir */
 		/* (the *real* Windows rmdir, not mingw_rmdir) */
 		if (is_symlink(pathname)) {
-			return rmdir(pathname);
+			int saved_errno;
+			ret = _wrmdir(wr.str);
+			saved_errno = errno;
+			wcs_free(&wr);
+			errno = saved_errno;
+			return ret;
 		}
+	}
+	{
+		int saved_errno = errno;
+		wcs_free(&wr);
+		errno = saved_errno;
 	}
 	return ret;
 }
@@ -1973,6 +2197,27 @@ int FAST_FUNC sysinfo(struct sysinfo *info)
 	return 0;
 }
 
+/*
+ * Sync TZ from our environment into the CRT, then call _tzset().
+ * Needed because our setenv/putenv update the OS environment block
+ * but not the CRT's internal copy that _tzset reads from.
+ */
+void mingw_tzset(void)
+{
+	const char *tz = mingw_getenv("TZ", false);
+	if (tz) {
+		char *envstr = xasprintf("TZ=%s", tz);
+		wchar_t wbuf[128];
+		wcs_result wr = bb_to_wcs(envstr, wbuf, sizeof(wbuf));
+		_wputenv(wr.str);
+		wcs_free(&wr);
+		free(envstr);
+	} else {
+		_wputenv(L"TZ=");
+	}
+	_tzset();
+}
+
 #undef strftime
 size_t FAST_FUNC
 mingw_strftime(char *buf, size_t max, const char *format, const struct tm *tm)
@@ -2014,7 +2259,7 @@ mingw_strftime(char *buf, size_t max, const char *format, const struct tm *tm)
 				replace = "%H:%M:%S";
 			}
 			else if ( t[1] == 'z' ) {
-				_tzset();
+				mingw_tzset();
 				if ( tm->tm_isdst >= 0 ) {
 					int offset = (int)_timezone - (tm->tm_isdst > 0 ? 3600 : 0);
 					int hr, min;
@@ -2070,13 +2315,20 @@ int FAST_FUNC mingw_access(const char *name, int mode)
 {
 	int ret;
 	struct stat s;
+	wchar_t wbuf[PATH_MAX];
+	wcs_result wr;
 
 	/* Windows can only handle test for existence, read or write */
 	if (mode == F_OK || (mode & ~X_OK)) {
-		ret = _access(name, mode & ~X_OK);
+		wr = bb_to_wcs(name, wbuf, sizeof(wbuf));
+		ret = _waccess(wr.str, mode & ~X_OK);
 		if (ret < 0 || !(mode & X_OK)) {
+			int saved_errno = errno;
+			wcs_free(&wr);
+			errno = saved_errno;
 			return ret;
 		}
+		wcs_free(&wr);
 	}
 
 	if (!mingw_stat(name, &s)) {
@@ -2091,6 +2343,10 @@ int FAST_FUNC mingw_access(const char *name, int mode)
 
 int FAST_FUNC mingw_rmdir(const char *path)
 {
+	int ret;
+	wchar_t wbuf[PATH_MAX];
+	wcs_result wr;
+
 	/* On Linux rmdir(2) doesn't remove symlinks */
 	if (is_symlink(path)) {
 		errno = ENOTDIR;
@@ -2098,8 +2354,15 @@ int FAST_FUNC mingw_rmdir(const char *path)
 	}
 
 	/* read-only directories cannot be removed */
-	chmod(path, 0666);
-	return rmdir(path);
+	mingw_chmod(path, 0666);
+	wr = bb_to_wcs(path, wbuf, sizeof(wbuf));
+	ret = _wrmdir(wr.str);
+	{
+		int saved_errno = errno;
+		wcs_free(&wr);
+		errno = saved_errno;
+	}
+	return ret;
 }
 
 void mingw_sync(void)
@@ -2107,13 +2370,13 @@ void mingw_sync(void)
 	HANDLE h;
 	FILE *mnt;
 	struct mntent *entry;
-	char name[] = "\\\\.\\C:";
+	wchar_t name[] = L"\\\\.\\C:";
 
 	mnt = setmntent(bb_path_mtab_file, "r");
 	if (mnt) {
 		while ((entry=getmntent(mnt)) != NULL) {
 			name[4] = entry->mnt_dir[0];
-			h = CreateFile(name, GENERIC_READ | GENERIC_WRITE,
+			h = CreateFileW(name, GENERIC_READ | GENERIC_WRITE,
 						FILE_SHARE_READ | FILE_SHARE_WRITE, NULL,
 						OPEN_EXISTING, 0, NULL);
 			if (h != INVALID_HANDLE_VALUE) {
@@ -2326,8 +2589,9 @@ int FAST_FUNC enumerate_links(const char *file, char *name)
 
 	if (file != NULL) {
 		wchar_t wfile[PATH_MAX];
-		MultiByteToWideChar(CP_ACP, 0, file, -1, wfile, PATH_MAX);
-		h = FindFirstFileNameW(wfile, 0, &length, wname);
+		wcs_result wr = bb_to_wcs(file, wfile, sizeof(wfile));
+		h = FindFirstFileNameW(wr.str, 0, &length, wname);
+		wcs_free(&wr);
 		if (h == INVALID_HANDLE_VALUE)
 			return 0;
 	}
@@ -2336,8 +2600,13 @@ int FAST_FUNC enumerate_links(const char *file, char *name)
 		h = INVALID_HANDLE_VALUE;
 		return 0;
 	}
-	WideCharToMultiByte(CP_ACP, 0, wname, -1, aname, PATH_MAX, NULL, NULL);
-	realpath(aname, name);
+	{
+		mbs_result mr = bb_to_mbs(wname, aname, sizeof(aname));
+		if (!mr.str)
+			return 0;
+		realpath(mr.str, name);
+		mbs_free(&mr);
+	}
 	return 1;
 }
 #endif
@@ -2377,14 +2646,19 @@ int FAST_FUNC root_len(const char *path)
 const char * FAST_FUNC get_system_drive(void)
 {
 	static const char *drive = NULL;
-	char sysdir[PATH_MAX];
 	int len;
 
 	if (drive == NULL) {
-		UINT ret = GetSystemDirectory(sysdir, PATH_MAX);
-		if ((ret != 0 && ret < PATH_MAX) && (len=root_len(sysdir)))
-			drive = xstrndup(sysdir, len);
-		else
+		wchar_t wsysdir[PATH_MAX];
+		UINT ret = GetSystemDirectoryW(wsysdir, PATH_MAX);
+		if (ret != 0 && ret < PATH_MAX) {
+			char sysdir[PATH_MAX];
+			mbs_result mr = bb_to_mbs(wsysdir, sysdir, sizeof(sysdir));
+			if ((len = root_len(mr.str)))
+				drive = xstrndup(mr.str, len);
+			mbs_free(&mr);
+		}
+		if (!drive)
 			drive = "";
 	}
 
@@ -2423,12 +2697,21 @@ char * FAST_FUNC xabsolute_path(char *path)
 
 char * FAST_FUNC get_drive_cwd(const char *path, char *buffer, int size)
 {
-	char drive[3] = { *path, ':', '\0' };
+	wchar_t wdrive[3] = { (wchar_t)*path, L':', L'\0' };
+	wchar_t wbuf[PATH_MAX];
 	DWORD ret;
 
-	ret = GetFullPathName(drive, size, buffer, NULL);
-	if (ret == 0 || ret > size)
+	ret = GetFullPathNameW(wdrive, PATH_MAX, wbuf, NULL);
+	if (ret == 0 || ret > PATH_MAX)
 		return NULL;
+	{
+		mbs_result mr = bb_to_mbs(wbuf, buffer, size);
+		if (mr.str != buffer) {
+			strncpy(buffer, mr.str, size);
+			buffer[size - 1] = '\0';
+			mbs_free(&mr);
+		}
+	}
 	return bs_to_slash(buffer);
 }
 
@@ -2476,22 +2759,34 @@ void * FAST_FUNC get_proc_addr(const char *dll, const char *function,
 {
 	/* only do this once */
 	if (!proc->initialized) {
-		HANDLE hnd = LoadLibraryExA(dll, NULL, LOAD_LIBRARY_SEARCH_SYSTEM32);
+		wchar_t wdll_buf[PATH_MAX];
+		wcs_result wr_dll = bb_to_wcs(dll, wdll_buf, sizeof(wdll_buf));
+		HANDLE hnd = LoadLibraryExW(wr_dll.str, NULL, LOAD_LIBRARY_SEARCH_SYSTEM32);
 
 		/* The documentation for LoadLibraryEx says the above may fail
 		 * on Windows 7.  If it does, retry using LoadLibrary with an
 		 * explicit, backslash-separated path. */
 		if (!hnd) {
-			char buf[PATH_MAX];
-			UINT ret = GetSystemDirectory(buf, PATH_MAX);
+			wchar_t wsysdir[PATH_MAX];
+			UINT ret = GetSystemDirectoryW(wsysdir, PATH_MAX);
 			if (ret != 0 && ret < PATH_MAX) {
-				char *path = concat_path_file(buf, dll);
+				char sysdir[PATH_MAX];
+				char *path;
+				mbs_result mr = bb_to_mbs(wsysdir, sysdir, sizeof(sysdir));
+				path = concat_path_file(mr.str, dll);
+				mbs_free(&mr);
 				slash_to_bs(path);
-				hnd = LoadLibrary(path);
+				{
+					wchar_t wpath_buf[PATH_MAX];
+					wcs_result wr_path = bb_to_wcs(path, wpath_buf, sizeof(wpath_buf));
+					hnd = LoadLibraryW(wr_path.str);
+					wcs_free(&wr_path);
+				}
 				free(path);
 			}
 		}
 
+		wcs_free(&wr_dll);
 		if (hnd)
 			proc->pfunction = GetProcAddress(hnd, function);
 		proc->initialized = 1;
@@ -2575,20 +2870,28 @@ char * FAST_FUNC xappendword(const char *str, const char *word)
 int
 windows_env(void)
 {
-	const char *names = "PATH=\0""COMSPEC=\0""PROGRAMDATA=\0";
-	const char *n;
+	const wchar_t *names[] = { L"PATH=", L"COMSPEC=", L"PROGRAMDATA=" };
+	wchar_t *env_block = GetEnvironmentStringsW();
+	wchar_t *p;
+	int result = FALSE;
 
-	for (char **envp = environ; envp && *envp; envp++) {
-		for (n = names; *n; ) {
-			if (is_prefixed_with_case(*envp, n) &&
-						!is_prefixed_with(*envp, n)) {
-				return TRUE;
+	if (!env_block)
+		return FALSE;
+
+	for (p = env_block; *p && !result; p += wcslen(p) + 1) {
+		int i;
+		for (i = 0; i < ARRAY_SIZE(names); i++) {
+			size_t len = wcslen(names[i]);
+			if (_wcsnicmp(p, names[i], len) == 0 &&
+						wcsncmp(p, names[i], len) != 0) {
+				result = TRUE;
+				break;
 			}
-			while (*n++)
-				;
 		}
 	}
-	return FALSE;
+
+	FreeEnvironmentStringsW(env_block);
+	return result;
 }
 
 void FAST_FUNC
@@ -2654,11 +2957,14 @@ BOOL FAST_FUNC mingw_CreateProcessAsUserA(HANDLE token, const char *app,
 
 int FAST_FUNC mingw_shell_execute(SHELLEXECUTEINFO *info)
 {
-	DECLARE_PROC_ADDR(BOOL, ShellExecuteExA, SHELLEXECUTEINFOA *);
+	DECLARE_PROC_ADDR(BOOL, ShellExecuteExW, SHELLEXECUTEINFOW *);
+	SHELLEXECUTEINFOW winfo;
+	wchar_t wverb[32], wfile[PATH_MAX];
+	wcs_result wr_verb = {0}, wr_file = {0}, wr_params = {0};
 	char *lpath;
 	int ret;
 
-	if (!INIT_PROC_ADDR(shell32.dll, ShellExecuteExA)) {
+	if (!INIT_PROC_ADDR(shell32.dll, ShellExecuteExW)) {
 		errno = ENOSYS;
 		return FALSE;
 	}
@@ -2666,10 +2972,29 @@ int FAST_FUNC mingw_shell_execute(SHELLEXECUTEINFO *info)
 	// ShellExecuteEx() needs backslash as separator in UNC paths.
 	lpath = xstrdup(info->lpFile);
 	slash_to_bs(lpath);
-	info->lpFile = lpath;
 
-	ret = ShellExecuteExA(info);
+	memset(&winfo, 0, sizeof(winfo));
+	winfo.cbSize = sizeof(winfo);
+	winfo.fMask = info->fMask;
+	winfo.hwnd = info->hwnd;
+	if (info->lpVerb) {
+		wr_verb = bb_to_wcs(info->lpVerb, wverb, sizeof(wverb));
+		winfo.lpVerb = wr_verb.str;
+	}
+	wr_file = bb_to_wcs(lpath, wfile, sizeof(wfile));
+	winfo.lpFile = wr_file.str;
+	if (info->lpParameters) {
+		wr_params = bb_to_wcs(info->lpParameters, NULL, 0);
+		winfo.lpParameters = wr_params.str;
+	}
+	winfo.nShow = info->nShow;
 
+	ret = ShellExecuteExW(&winfo);
+	info->hProcess = winfo.hProcess;
+
+	wcs_free(&wr_params);
+	wcs_free(&wr_file);
+	wcs_free(&wr_verb);
 	free(lpath);
 	return ret;
 }

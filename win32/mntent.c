@@ -4,6 +4,7 @@
  */
 #define MNTENT_PRIVATE
 #include "libbb.h"
+#include "strconv.h"
 
 struct mntstate {
 	DWORD drives;
@@ -34,12 +35,25 @@ int FAST_FUNC fill_mntdata(struct mntdata *data, int index)
 	data->mnt_type[0] = '\0';
 	data->mnt_opts[0] = '\0';
 
-	drive_type = GetDriveType(data->mnt_dir);
+	{
+		wchar_t wdir[4] = { L'A' + index, L':', L'/', L'\0' };
+		drive_type = GetDriveTypeW(wdir);
+	}
 	if (drive_type == DRIVE_FIXED || drive_type == DRIVE_CDROM ||
 			drive_type == DRIVE_REMOVABLE || drive_type == DRIVE_REMOTE) {
-		if (!GetVolumeInformation(data->mnt_dir, NULL, 0, NULL, NULL,
-						NULL, data->mnt_type, 100)) {
+		wchar_t wdir[4] = { L'A' + index, L':', L'/', L'\0' };
+		wchar_t wtype[100];
+		if (!GetVolumeInformationW(wdir, NULL, 0, NULL, NULL,
+						NULL, wtype, 100)) {
 			return FALSE;
+		}
+		{
+			mbs_result mr = bb_to_mbs(wtype, data->mnt_type, 100);
+			if (mr.str != data->mnt_type) {
+				strncpy(data->mnt_type, mr.str, 100);
+				data->mnt_type[99] = '\0';
+				mbs_free(&mr);
+			}
 		}
 
 		if (realpath(data->mnt_dir, buf) != NULL) {

@@ -5,10 +5,10 @@
 #include "libbb.h"
 #include <windows.h>
 #include "lazyload.h"
+#include "strconv.h"
 #undef PACKED
 
 static BOOL charToConBuffA(LPSTR s, DWORD len);
-static BOOL charToConA(LPSTR s);
 
 static int conv_fwriteCon(FILE *stream, char *buf, size_t siz);
 static int conv_writeCon(int fd, char *buf, size_t siz);
@@ -179,12 +179,26 @@ int FAST_FUNC terminal_mode(int reset)
 
 void FAST_FUNC set_title(const char *str)
 {
-	SetConsoleTitle(str);
+	wchar_t wbuf[260];
+	wcs_result wr = bb_to_wcs(str, wbuf, sizeof(wbuf));
+	SetConsoleTitleW(wr.str);
+	wcs_free(&wr);
 }
 
 int FAST_FUNC get_title(char *buf, int len)
 {
-	return GetConsoleTitle(buf, len);
+	wchar_t wbuf[260];
+	DWORD ret = GetConsoleTitleW(wbuf, 260);
+	if (ret > 0) {
+		mbs_result mr = bb_to_mbs(wbuf, buf, len);
+		if (mr.str != buf && mr.str != NULL) {
+			strncpy(buf, mr.str, len);
+			buf[len - 1] = '\0';
+			mbs_free(&mr);
+		}
+		return (int)strlen(buf);
+	}
+	return 0;
 }
 
 static HANDLE dup_handle(HANDLE h)
@@ -250,7 +264,7 @@ static void clear_buffer(DWORD len, COORD pos)
 	HANDLE console = get_console();
 	DWORD dummy;
 
-	FillConsoleOutputCharacterA(console, ' ', len, pos, &dummy);
+	FillConsoleOutputCharacterW(console, L' ', len, pos, &dummy);
 	FillConsoleOutputAttribute(console, plain_attr, len, pos, &dummy);
 }
 
@@ -549,8 +563,12 @@ static char *process_escape(char *pos)
 				(bel=strchr(pos+4, '\007')) && bel - pos < 260) {
 			/* set console title */
 			*bel++ = '\0';
-			charToConA(pos+4);
-			SetConsoleTitle(pos+4);
+			{
+			wchar_t wtitle_buf[260];
+			wcs_result wr_title = bb_to_wcs(pos+4, wtitle_buf, sizeof(wtitle_buf));
+			SetConsoleTitleW(wr_title.str);
+			wcs_free(&wr_title);
+		}
 			return bel;
 		}
 		/* invalid "\033]" sequence, fall through */
@@ -719,56 +737,49 @@ static char *process_escape(char *pos)
 
 static BOOL charToConBuffA(LPSTR s, DWORD len)
 {
-	UINT acp = GetACP(), conocp = GetConsoleOutputCP();
-	CPINFO acp_info, con_info;
+	UINT cp = bb_get_codepage(), conocp = GetConsoleOutputCP();
+	CPINFO cp_info, con_info;
 	WCHAR *buf;
 
-	if (acp == conocp)
+	if (cp == conocp)
 		return TRUE;
 
-	if (!s || !GetCPInfo(acp, &acp_info) || !GetCPInfo(conocp, &con_info) ||
-			con_info.MaxCharSize > acp_info.MaxCharSize ||
-			(len == 1 && acp_info.MaxCharSize != 1))
+	if (!s || !GetCPInfo(cp, &cp_info) || !GetCPInfo(conocp, &con_info) ||
+			con_info.MaxCharSize > cp_info.MaxCharSize ||
+			(len == 1 && cp_info.MaxCharSize != 1))
 		return FALSE;
 
 	terminal_mode(FALSE);
 	buf = xmalloc(len*sizeof(WCHAR));
-	MultiByteToWideChar(CP_ACP, 0, s, len, buf, len);
+	MultiByteToWideChar(cp, 0, s, len, buf, len);
 	WideCharToMultiByte(conocp, 0, buf, len, s, len, NULL, NULL);
 	free(buf);
 	return TRUE;
 }
 
-static BOOL charToConA(LPSTR s)
-{
-	if (!s)
-		return FALSE;
-	return charToConBuffA(s, strlen(s)+1);
-}
-
 BOOL FAST_FUNC conToCharBuffA(LPSTR s, DWORD len)
 {
-	UINT acp = GetACP(), conicp = GetConsoleCP();
-	CPINFO acp_info, con_info;
+	UINT cp = bb_get_codepage(), conicp = GetConsoleCP();
+	CPINFO cp_info, con_info;
 	WCHAR *buf;
 
-	if (acp == conicp
+	if (cp == conicp
 #if ENABLE_FEATURE_UTF8_INPUT
-			// if acp is UTF8 then we got UTF8 via readConsoleInput_utf8
-			|| acp == CP_UTF8
+			// if cp is UTF8 then we got UTF8 via readConsoleInput_utf8
+			|| cp == CP_UTF8
 #endif
 		)
 		return TRUE;
 
-	if (!s || !GetCPInfo(acp, &acp_info) || !GetCPInfo(conicp, &con_info) ||
-			acp_info.MaxCharSize > con_info.MaxCharSize ||
+	if (!s || !GetCPInfo(cp, &cp_info) || !GetCPInfo(conicp, &con_info) ||
+			cp_info.MaxCharSize > con_info.MaxCharSize ||
 			(len == 1 && con_info.MaxCharSize != 1))
 		return FALSE;
 
 	terminal_mode(FALSE);
 	buf = xmalloc(len*sizeof(WCHAR));
 	MultiByteToWideChar(conicp, 0, s, len, buf, len);
-	WideCharToMultiByte(CP_ACP, 0, buf, len, s, len, NULL, NULL);
+	WideCharToMultiByte(cp, 0, buf, len, s, len, NULL, NULL);
 	free(buf);
 	return TRUE;
 }
@@ -1365,7 +1376,7 @@ readConsoleInput_utf8(HANDLE h, INPUT_RECORD *r, DWORD len, DWORD *got)
 		return FALSE;
 
 	// if ACP is UTF8 then we read UTF8 regardless of console (in) CP
-	if (GetConsoleCP() != CP_UTF8 && GetACP() != CP_UTF8)
+	if (GetConsoleCP() != CP_UTF8 && bb_get_codepage() != CP_UTF8)
 		return ReadConsoleInput(h, r, len, got);
 
 	if (u8pos == u8len) {
@@ -1555,7 +1566,7 @@ static int writeCon_utf8(int fd, const char *u8buf, size_t u8siz)
 void FAST_FUNC console_write(const char *str, int len)
 {
 	char *buf = xmemdup(str, len);
-	int fd = _open("CONOUT$", _O_WRONLY);
+	int fd = _wopen(L"CONOUT$", _O_WRONLY);
 	conv_writeCon(fd, buf, len);
 	close(fd);
 	free(buf);
@@ -1602,12 +1613,12 @@ static int conv_fwriteCon(FILE *stream, char *buf, size_t siz)
 {
 	if (conout_conv_enabled()) {
 #if ENABLE_FEATURE_UTF8_OUTPUT
-		int acp = GetACP();
-		if (acp == CP_UTF8 && GetConsoleOutputCP() != CP_UTF8) {
+		int cp = bb_get_codepage();
+		if (cp == CP_UTF8 && GetConsoleOutputCP() != CP_UTF8) {
 			fflush(stream);  // writeCon_utf8 is unbuffered
 			return writeCon_utf8(fileno(stream), buf, siz) ? EOF : 0;
 		}
-		if (acp != CP_UTF8)
+		if (cp != CP_UTF8)
 			charToConBuffA(buf, siz);
 #else
 		charToConBuffA(buf, siz);
@@ -1622,10 +1633,10 @@ static int conv_writeCon(int fd, char *buf, size_t siz)
 {
 	if (conout_conv_enabled()) {
 #if ENABLE_FEATURE_UTF8_OUTPUT
-		int acp = GetACP();
-		if (acp == CP_UTF8 && GetConsoleOutputCP() != CP_UTF8)
+		int cp = bb_get_codepage();
+		if (cp == CP_UTF8 && GetConsoleOutputCP() != CP_UTF8)
 			return writeCon_utf8(fd, buf, siz) ? -1 : siz;
-		if (acp != CP_UTF8)
+		if (cp != CP_UTF8)
 			charToConBuffA(buf, siz);
 #else
 		charToConBuffA(buf, siz);

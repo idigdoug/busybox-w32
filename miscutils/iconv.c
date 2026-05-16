@@ -641,7 +641,7 @@ load_mlang(void)
 	HMODULE h;
 	if (ConvertINetMultiByteToUnicode != NULL)
 		return TRUE;
-	h = LoadLibrary(TEXT("mlang.dll"));
+	h = LoadLibraryW(L"mlang.dll");
 	if (!h)
 		return FALSE;
 	ConvertINetMultiByteToUnicode = (CONVERTINETMULTIBYTETOUNICODE)GetProcAddressA(h, "ConvertINetMultiByteToUnicode");

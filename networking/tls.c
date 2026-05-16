@@ -3210,6 +3210,7 @@ void FAST_FUNC tls_handshake_as_server(tls_state_t *tls,
 
 #include <security.h>
 #include <schannel.h>
+#include "strconv.h"
 
 #ifndef SECBUFFER_ALERT
 # define SECBUFFER_ALERT 17
@@ -3230,12 +3231,20 @@ void FAST_FUNC tls_handshake_as_server(tls_state_t *tls,
 
 static char *hresult_to_error_string(HRESULT result) {
 	char *output = NULL;
+	wchar_t *wmsg = NULL;
 
-	FormatMessageA(FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM
+	if (FormatMessageW(FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM
 				   | FORMAT_MESSAGE_IGNORE_INSERTS |
 				   FORMAT_MESSAGE_MAX_WIDTH_MASK, NULL, result,
 				   MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT),
-				   (char *) &output, 0, NULL);
+				   (wchar_t *) &wmsg, 0, NULL) && wmsg) {
+		int len = WideCharToMultiByte(CP_UTF8, 0, wmsg, -1, NULL, 0, NULL, NULL);
+		if (len > 0) {
+			output = xmalloc(len);
+			WideCharToMultiByte(CP_UTF8, 0, wmsg, -1, output, len, NULL, NULL);
+		}
+		LocalFree(wmsg);
+	}
 	return output;
 }
 
@@ -3364,9 +3373,12 @@ static ssize_t tls_read(tls_state_t *state, char *buf, ssize_t len) {
 					init_sec_buffer_desc(
 						&out_buffers_desc, out_buffers, _countof(out_buffers));
 
-					status = InitializeSecurityContextA(&state->cred_handle,
+				{
+					wchar_t whostname_buf[256];
+					wcs_result wr_host = bb_to_wcs(state->hostname, whostname_buf, sizeof(whostname_buf));
+					status = InitializeSecurityContextW(&state->cred_handle,
 														&state->ctx_handle,
-														state->hostname,
+														wr_host.str,
 														flags,
 														0,
 														0,
@@ -3376,6 +3388,8 @@ static ssize_t tls_read(tls_state_t *state, char *buf, ssize_t len) {
 														&out_buffers_desc,
 														&flags,
 														0);
+					wcs_free(&wr_host);
+				}
 
 					if (SEC_STATUS_FAIL(status)) {
 						bb_error_msg_and_die("schannel: renegotiate failed: (0x%08lx): %s",
@@ -3477,18 +3491,23 @@ static void tls_disconnect(tls_state_t * state) {
 	init_sec_buffer_empty(&out_buffer, SECBUFFER_TOKEN);
 	init_sec_buffer_desc(&out_buffer_desc, &out_buffer, 1);
 
-	status = InitializeSecurityContextA(&state->cred_handle,
-	                                    &state->ctx_handle,
-	                                    state->hostname,
-	                                    flags,
-	                                    0,
-	                                    0,
-	                                    NULL,
-	                                    0,
-	                                    &state->ctx_handle,
-	                                    &out_buffer_desc,
-	                                    &flags,
-	                                    0);
+	{
+		wchar_t whostname_buf[256];
+		wcs_result wr_host = bb_to_wcs(state->hostname, whostname_buf, sizeof(whostname_buf));
+		status = InitializeSecurityContextW(&state->cred_handle,
+		                                    &state->ctx_handle,
+		                                    wr_host.str,
+		                                    flags,
+		                                    0,
+		                                    0,
+		                                    NULL,
+		                                    0,
+		                                    &state->ctx_handle,
+		                                    &out_buffer_desc,
+		                                    &flags,
+		                                    0);
+		wcs_free(&wr_host);
+	}
 
 	if ((status == SEC_E_OK) || (status == SEC_I_CONTEXT_EXPIRED)) {
 		write(state->ofd, out_buffer.pvBuffer, out_buffer.cbBuffer);
@@ -3556,8 +3575,8 @@ void FAST_FUNC tls_handshake(tls_state_t *state, const char *hostname) {
 	state->initialized = false;
 	state->connection_state = BB_SCHANNEL_OPEN;
 
-	if (SEC_STATUS_FAIL(status = AcquireCredentialsHandleA(NULL,
-	                                                       (SEC_CHAR *)UNISP_NAME_A,
+	if (SEC_STATUS_FAIL(status = AcquireCredentialsHandleW(NULL,
+	                                                       (SEC_WCHAR *)UNISP_NAME_W,
 	                                                       SECPKG_CRED_OUTBOUND,
 	                                                       NULL,
 	                                                       &credential,
@@ -3565,7 +3584,7 @@ void FAST_FUNC tls_handshake(tls_state_t *state, const char *hostname) {
 	                                                       NULL,
 	                                                       &state->cred_handle,
 	                                                       NULL))) {
-		bb_error_msg_and_die("schannel: AcquireCredentialsHandleA failed: (0x%08lx): %s",
+		bb_error_msg_and_die("schannel: AcquireCredentialsHandleW failed: (0x%08lx): %s",
 			status, hresult_to_error_string(status));
 	}
 
@@ -3593,19 +3612,24 @@ void FAST_FUNC tls_handshake(tls_state_t *state, const char *hostname) {
 		init_sec_buffer_desc(
 		    &out_buffers_desc, out_buffers, _countof(out_buffers));
 
-		status = InitializeSecurityContextA(
-		    &state->cred_handle,
-		    state->initialized ? &state->ctx_handle : NULL,
-		    state->hostname,
-		    flags,
-		    0,
-		    0,
-		    state->initialized ? &in_buffers_desc : NULL,
-		    0,
-		    &state->ctx_handle,
-		    &out_buffers_desc,
-		    &flags,
-		    0);
+		{
+			wchar_t whostname_buf[256];
+			wcs_result wr_host = bb_to_wcs(state->hostname, whostname_buf, sizeof(whostname_buf));
+			status = InitializeSecurityContextW(
+			    &state->cred_handle,
+			    state->initialized ? &state->ctx_handle : NULL,
+			    wr_host.str,
+			    flags,
+			    0,
+			    0,
+			    state->initialized ? &in_buffers_desc : NULL,
+			    0,
+			    &state->ctx_handle,
+			    &out_buffers_desc,
+			    &flags,
+			    0);
+			wcs_free(&wr_host);
+		}
 
 		state->initialized = true;
 
@@ -3658,7 +3682,7 @@ void FAST_FUNC tls_handshake(tls_state_t *state, const char *hostname) {
 	}
 
 Success:
-	QueryContextAttributes(
+	QueryContextAttributesW(
 	    &state->ctx_handle, SECPKG_ATTR_STREAM_SIZES, &state->stream_sizes);
 	return;
 }

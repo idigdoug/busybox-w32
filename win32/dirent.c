@@ -1,4 +1,5 @@
 #include "libbb.h"
+#include "strconv.h"
 
 struct DIR {
 	struct dirent dd_dir;
@@ -8,10 +9,15 @@ struct DIR {
 	int got_dotdot;
 };
 
-static inline void finddata2dirent(struct dirent *ent, WIN32_FIND_DATAA *fdata)
+static inline void finddata2dirent(struct dirent *ent, WIN32_FIND_DATAW *fdata)
 {
-	/* copy file name from WIN32_FIND_DATA to dirent */
-	strcpy(ent->d_name, fdata->cFileName);
+	/* convert wide file name to multibyte and copy to dirent */
+	mbs_result mr = bb_to_mbs(fdata->cFileName, ent->d_name, sizeof(ent->d_name));
+	if (mr.str != ent->d_name) {
+		strncpy(ent->d_name, mr.str, sizeof(ent->d_name) - 1);
+		ent->d_name[sizeof(ent->d_name) - 1] = '\0';
+		mbs_free(&mr);
+	}
 
 	if ((fdata->dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) &&
 			(fdata->dwReserved0 == IO_REPARSE_TAG_SYMLINK ||
@@ -26,34 +32,39 @@ static inline void finddata2dirent(struct dirent *ent, WIN32_FIND_DATAA *fdata)
 
 DIR * FAST_FUNC opendir(const char *name)
 {
-	char pattern[MAX_PATH];
-	WIN32_FIND_DATAA fdata;
+	wchar_t wpattern[MAX_PATH];
+	WIN32_FIND_DATAW fdata;
 	HANDLE h;
 	int len;
 	DIR *dir;
+	wcs_result wr;
 
 	/* check that name is not NULL */
 	if (!name) {
 		errno = EINVAL;
 		return NULL;
 	}
-	/* check that the pattern won't be too long for FindFirstFileA */
+	/* check that the pattern won't be too long for FindFirstFileW */
 	len = strlen(name);
 	if (len + 2 >= MAX_PATH) {
 		errno = ENAMETOOLONG;
 		return NULL;
 	}
-	/* copy name to temp buffer */
-	strcpy(pattern, name);
 
-	/* append optional '/' and wildcard '*' */
-	if (len && !is_dir_sep(pattern[len - 1]))
-		pattern[len++] = '/';
-	pattern[len++] = '*';
-	pattern[len] = 0;
+	/* build pattern: name + optional '/' + '*' */
+	{
+		char pattern[MAX_PATH];
+		strcpy(pattern, name);
+		if (len && !is_dir_sep(pattern[len - 1]))
+			pattern[len++] = '/';
+		pattern[len++] = '*';
+		pattern[len] = 0;
+		wr = bb_to_wcs(pattern, wpattern, sizeof(wpattern));
+	}
 
 	/* open find handle */
-	h = FindFirstFileA(pattern, &fdata);
+	h = FindFirstFileW(wr.str, &fdata);
+	wcs_free(&wr);
 	if (h == INVALID_HANDLE_VALUE) {
 		DWORD err = GetLastError();
 		errno = (err == ERROR_DIRECTORY) ? ENOTDIR : err_win_to_posix();
@@ -80,8 +91,8 @@ struct dirent * FAST_FUNC readdir(DIR *dir)
 	/* if first entry, dirent has already been set up by opendir */
 	if (dir->not_first) {
 		/* get next entry and convert from WIN32_FIND_DATA to dirent */
-		WIN32_FIND_DATAA fdata;
-		if (FindNextFileA(dir->dd_handle, &fdata)) {
+		WIN32_FIND_DATAW fdata;
+		if (FindNextFileW(dir->dd_handle, &fdata)) {
 			finddata2dirent(&dir->dd_dir, &fdata);
 		} else if (!dir->got_dot) {
 			strcpy(dir->dd_dir.d_name, ".");

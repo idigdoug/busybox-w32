@@ -45,15 +45,15 @@
 
 /* Don't assume that UNICODE is not defined.  */
 #undef GetModuleHandle
-#define GetModuleHandle GetModuleHandleA
+#define GetModuleHandle GetModuleHandleW
 #undef PeekConsoleInput
-#define PeekConsoleInput PeekConsoleInputA
+#define PeekConsoleInput PeekConsoleInputW
 #undef CreateEvent
-#define CreateEvent CreateEventA
+#define CreateEvent CreateEventW
 #undef PeekMessage
-#define PeekMessage PeekMessageA
+#define PeekMessage PeekMessageW
 #undef DispatchMessage
-#define DispatchMessage DispatchMessageA
+#define DispatchMessage DispatchMessageW
 
 /* Avoid warnings from gcc -Wcast-function-type.  */
 #define GetProcAddress \
@@ -150,7 +150,7 @@ windows_poll_handle (HANDLE h, int fd,
       if (!once_only)
         {
           NtQueryInformationFile = (PNtQueryInformationFile)
-            GetProcAddress (GetModuleHandle ("ntdll.dll"),
+            GetProcAddress (GetModuleHandleW (L"ntdll.dll"),
                             "NtQueryInformationFile");
           once_only = TRUE;
         }
@@ -294,7 +294,7 @@ mingw_select (int nfds, fd_set *rfds, fd_set *wfds, fd_set *xfds,
     }
 
   if (!hEvent)
-    hEvent = CreateEvent (NULL, FALSE, FALSE, NULL);
+    hEvent = CreateEventW (NULL, FALSE, FALSE, NULL);
 
   handle_array[0] = hEvent;
   nhandles = 1;
@@ -454,10 +454,10 @@ restart:
         {
           /* new input of some other kind */
           BOOL bRet;
-          while ((bRet = PeekMessage (&msg, NULL, 0, 0, PM_REMOVE)) != 0)
+          while ((bRet = PeekMessageW (&msg, NULL, 0, 0, PM_REMOVE)) != 0)
             {
               TranslateMessage (&msg);
-              DispatchMessage (&msg);
+              DispatchMessageW (&msg);
             }
         }
       else

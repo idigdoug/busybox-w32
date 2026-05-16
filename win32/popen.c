@@ -1,5 +1,6 @@
 #include <fcntl.h>
 #include "libbb.h"
+#include "strconv.h"
 #include "NUM_APPLETS.h"
 
 typedef struct {
@@ -30,21 +31,27 @@ static int mingw_pipe(pipe_data *p, int bidi)
 	}
 	else {
 		char *name;
+		wchar_t *wname;
 		const int ip = 1; /* index of parent end of pipe */
 		const int ic = 0; /* index of child end of pipe */
 		static int count = 0;
 
 		name = xasprintf("\\\\.\\pipe\\bb_pipe.%d.%d", getpid(), ++count);
+		{
+			wcs_result wr = bb_to_wcs(name, NULL, 0);
+			wname = wr.str;
+		}
 
-		p->pipe[ip] = CreateNamedPipe(name,
+		p->pipe[ip] = CreateNamedPipeW(wname,
 							PIPE_ACCESS_DUPLEX|FILE_FLAG_OVERLAPPED,
 							PIPE_TYPE_BYTE|PIPE_WAIT,
 							1, 4096, 4096, 0, &sa);
 
-		p->pipe[ic] = CreateFile(name, GENERIC_READ|GENERIC_WRITE, 0, &sa,
+		p->pipe[ic] = CreateFileW(wname, GENERIC_READ|GENERIC_WRITE, 0, &sa,
 									OPEN_EXISTING,
 									FILE_ATTRIBUTE_NORMAL|FILE_FLAG_OVERLAPPED,
 									NULL);
+		free(wname);
 		free(name);
 	}
 
@@ -174,7 +181,6 @@ static int mingw_popen_internal(pipe_data *p, const char *exe,
 					const char *cmd, const char *mode, int fd0, pid_t *pid)
 {
 	pipe_data pd;
-	STARTUPINFO siStartInfo;
 	int success;
 	int fd = -1;
 	int ip, ic, flags;
@@ -226,8 +232,13 @@ static int mingw_popen_internal(pipe_data *p, const char *exe,
 	SetHandleInformation(p->pipe[ip], HANDLE_FLAG_INHERIT, 0);
 
 	/* Now create the child process */
-	ZeroMemory(&siStartInfo, sizeof(STARTUPINFO));
-	siStartInfo.cb = sizeof(STARTUPINFO);
+	{
+	STARTUPINFOW siStartInfo;
+	wchar_t wexe_buf[PATH_MAX];
+	wcs_result wr_exe, wr_cmd;
+
+	ZeroMemory(&siStartInfo, sizeof(STARTUPINFOW));
+	siStartInfo.cb = sizeof(STARTUPINFOW);
 	/* default settings for a bidirectional pipe */
 	siStartInfo.hStdInput = p->pipe[ic];
 	siStartInfo.hStdOutput = p->pipe[ic];
@@ -248,16 +259,23 @@ static int mingw_popen_internal(pipe_data *p, const char *exe,
 	siStartInfo.wShowWindow = SW_HIDE;
 	siStartInfo.dwFlags = STARTF_USESTDHANDLES|STARTF_USESHOWWINDOW;
 
-	success = CreateProcess((LPCSTR)exe,
-				(LPSTR)cmd,        /* command line */
+	wr_exe = bb_to_wcs(exe, wexe_buf, sizeof(wexe_buf));
+	wr_cmd = bb_to_wcs(cmd, NULL, 0);
+
+	success = CreateProcessW(wr_exe.str,
+				wr_cmd.str,        /* command line */
 				NULL,              /* process security attributes */
 				NULL,              /* primary thread security attributes */
 				TRUE,              /* handles are inherited */
-				0,                 /* creation flags */
+				CREATE_UNICODE_ENVIRONMENT,  /* creation flags */
 				NULL,              /* use parent's environment */
 				NULL,              /* use parent's current directory */
 				&siStartInfo,      /* STARTUPINFO pointer */
 				&p->piProcInfo);   /* receives PROCESS_INFORMATION */
+
+	wcs_free(&wr_exe);
+	wcs_free(&wr_cmd);
+	}
 
 	if ( !success ) {
 		goto finito;

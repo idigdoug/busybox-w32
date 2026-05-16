@@ -12412,14 +12412,18 @@ evalcommand(union node *cmd, int flags)
 		/* find_command() encodes applet_no as (-2 - applet_no) */
 		int applet_no = (- cmdentry.u.index - 2);
 		if (applet_no >= 0 && APPLET_IS_NOFORK(applet_no)) {
+#if !ENABLE_PLATFORM_MINGW32
 			char **sv_environ;
+#endif
 #if ENABLE_PLATFORM_MINGW32
 			char *sv_argv0;
 #endif
 
 			INTOFF;
+#if !ENABLE_PLATFORM_MINGW32
 			sv_environ = environ;
 			environ = listvars(VEXPORT, VUNSET, varlist.list, /*end:*/ NULL);
+#endif
 			/*
 			 * Run <applet>_main().
 			 * Signals (^C) can't interrupt here.
@@ -12434,7 +12438,9 @@ evalcommand(union node *cmd, int flags)
 			__argv[0] = argv[0];
 #endif
 			exitstatus = run_nofork_applet(applet_no, argv);
+#if !ENABLE_PLATFORM_MINGW32
 			environ = sv_environ;
+#endif
 #if ENABLE_PLATFORM_MINGW32
 			__argv[0] = sv_argv0;
 #endif
@@ -16364,11 +16370,10 @@ exitshell(void)
 }
 
 #if ENABLE_PLATFORM_MINGW32
-/* We need to see if HOME is *really* unset */
-# undef getenv
+/* Check if a variable exists in the OS environment without mingw_getenv fallbacks */
 static void setvar_if_unset(const char *key, const char *value)
 {
-	if (!getenv(key) || getuid() == 0)
+	if (!mingw_getenv(key, false) || getuid() == 0)
 		setvar(key, value, VEXPORT);
 }
 #endif
@@ -17763,7 +17768,7 @@ forkshell_prepare(struct forkshell *fs)
 	sa.nLength = sizeof(sa);
 	sa.lpSecurityDescriptor = NULL;
 	sa.bInheritHandle = TRUE;
-	h = CreateFileMapping(INVALID_HANDLE_VALUE, &sa, PAGE_READWRITE, 0,
+	h = CreateFileMappingW(INVALID_HANDLE_VALUE, &sa, PAGE_READWRITE, 0,
 			size+bitmapsize, NULL);
 
 	/* Initialise pointers */

@@ -378,7 +378,7 @@ int inotifyd_main(int argc, char **argv)
 		watch[n].dirname = *argv;
 		watch[n].mask = mask;
 		watch[n].bits = bits;
-		watch[n].hevent = hevent[n] = CreateEvent(NULL, TRUE, FALSE, NULL);
+		watch[n].hevent = hevent[n] = CreateEventW(NULL, TRUE, FALSE, NULL);
 
 		if (!start_watch(watch+n))
 			break;

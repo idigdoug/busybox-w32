@@ -9,6 +9,7 @@
 #include <stdlib.h>
 #include <libgen.h>
 #include <windows.h>
+#include "strconv.h"
 
 #if defined(__MINGW64_VERSION_MAJOR) && __MINGW64_VERSION_MAJOR > 11
 
@@ -92,8 +93,8 @@ do_get_path_info(struct path_info* info, char* path)
     DWORD cp;
     int dbcs_tb, prev_dir_sep, dir_sep;
 
-    /* Get the code page for paths in the same way as `fopen()`.  */
-    cp = AreFileApisANSI() ? CP_ACP : CP_OEMCP;
+    /* Use our configured codepage, not the system ACP.  */
+    cp = bb_get_codepage();
 
     /* Set the structure to 'no data'.  */
     info->prefix_end = NULL;

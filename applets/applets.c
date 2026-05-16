@@ -9,7 +9,7 @@
 #include "busybox.h"
 
 #if ENABLE_BUILD_LIBBUSYBOX
-# ifdef _WIN32
+# if ENABLE_PLATFORM_MINGW32
 int wmain(int argc UNUSED_PARAM, wchar_t **wargv)
 {
 	return lbb_wmain(wargv);

@@ -2012,7 +2012,7 @@ int less_main(int argc, char **argv)
 	G.kbd_fd_orig_flags = ndelay_on(tty_fd);
 	kbd_fd = tty_fd; /* save in a global */
 #else
-	h = CreateFileA("CONIN$", GENERIC_READ | GENERIC_WRITE,
+	h = CreateFileW(L"CONIN$", GENERIC_READ | GENERIC_WRITE,
 					FILE_SHARE_READ, NULL, OPEN_EXISTING,
 					FILE_ATTRIBUTE_NORMAL, NULL);
 	if (h == INVALID_HANDLE_VALUE)

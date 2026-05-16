@@ -5,7 +5,7 @@
 int uname(struct utsname *name)
 {
 	const char *unk = "unknown";
-	OSVERSIONINFO os_info;
+	OSVERSIONINFOW os_info;
 	SYSTEM_INFO sys_info;
 
 	strcpy(name->sysname, "Windows_NT");
@@ -14,10 +14,10 @@ int uname(struct utsname *name)
 		strcpy(name->nodename, unk);
 	}
 
-	memset(&os_info, 0, sizeof(OSVERSIONINFO));
-	os_info.dwOSVersionInfoSize = sizeof(OSVERSIONINFO);
+	memset(&os_info, 0, sizeof(OSVERSIONINFOW));
+	os_info.dwOSVersionInfoSize = sizeof(OSVERSIONINFOW);
 
-	GetVersionEx(&os_info);
+	GetVersionExW(&os_info);
 	sprintf(name->release, "%u.%u", (unsigned int)os_info.dwMajorVersion,
 			(unsigned int)os_info.dwMinorVersion);
 	sprintf(name->version, "%u", (unsigned int)os_info.dwBuildNumber);

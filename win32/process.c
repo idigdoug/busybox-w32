@@ -2,6 +2,7 @@
 #include <tlhelp32.h>
 #include <psapi.h>
 #include "lazyload.h"
+#include "strconv.h"
 #include "NUM_APPLETS.h"
 
 #ifndef ERROR_ELEVATION_REQUIRED
@@ -156,19 +157,61 @@ find_first_executable(const char *name)
 	return find_executable(name, &path);
 }
 
+/*
+ * Build a wide environment block from a char** array of "NAME=VALUE" strings.
+ * The result is a NUL-separated, double-NUL-terminated wide string suitable
+ * for CreateProcessW.  Caller must free() the returned pointer.
+ */
+static wchar_t *build_env_block(char *const *env)
+{
+	int i, count;
+	size_t total = 0;
+	wchar_t *block, *p;
+
+	count = string_array_len((char **)env);
+
+	/* First pass: compute total wide chars needed */
+	for (i = 0; i < count; i++)
+		total += strlen(env[i]) + 1;  /* overestimate: UTF-8 never expands */
+	total++;  /* trailing NUL */
+
+	/* Allocate generously (each UTF-8 byte -> at most 1 wchar_t) */
+	block = xmalloc(total * sizeof(wchar_t));
+	p = block;
+
+	for (i = 0; i < count; i++) {
+		int wlen = MultiByteToWideChar(bb_get_codepage(), 0,
+					env[i], -1, p, (int)(block + total - p));
+		if (wlen == 0)
+			bb_error_msg_and_die("env conversion failed: %s", env[i]);
+		p += wlen;  /* wlen includes NUL, p now points past the NUL */
+	}
+	*p = L'\0';  /* double-NUL terminator */
+
+	return block;
+}
+
 static intptr_t
 spawnveq(int mode, const char *path, char *const *argv, char *const *env)
 {
 	char **new_argv;
 	char *new_path = NULL;
+	char *command = NULL;
 	int i, argc;
 	intptr_t ret;
 	struct stat st;
 	size_t len = 0;
+	const char *final_path;
+	wchar_t wpath_buf[PATH_MAX];
+	wcs_result wr_path = {0};
+	wcs_result wr_cmd = {0};
+	wchar_t *env_block = NULL;
+	STARTUPINFOW si;
+	PROCESS_INFORMATION pi;
+	DWORD creation_flags = 0;
 
 	/*
 	 * Require that the file exists, is a regular file and is executable.
-	 * It may still contain garbage but we let spawnve deal with that.
 	 */
 	if (stat(path, &st) == 0) {
 		if (!S_ISREG(st.st_mode) || !(st.st_mode&S_IXUSR)) {
@@ -187,14 +230,11 @@ spawnveq(int mode, const char *path, char *const *argv, char *const *env)
 		len += strlen(new_argv[i]) + 1;
 	}
 
-	/* Special case:  spawnve won't execute a batch file if the first
-	 * argument is a relative path containing forward slashes.  Absolute
-	 * paths are fine but there's no harm in converting them too. */
+	/* Special case:  batch files need backslashes in argv[0]. */
 	if (has_bat_suffix(path)) {
 		slash_to_bs(new_argv[0]);
 
-		/* Another special case:  spawnve returns ENOEXEC when passed an
-		 * empty batch file.  Pretend it worked. */
+		/* Empty batch file: pretend it worked. */
 		if (st.st_size == 0) {
 			ret = 0;
 			goto done;
@@ -202,21 +242,75 @@ spawnveq(int mode, const char *path, char *const *argv, char *const *env)
 	}
 
 	/*
-	 * Another special case:  if a file doesn't have an extension add
-	 * a '.' at the end.  This forces spawnve to use precisely the
-	 * file specified without trying to add an extension.
+	 * If a file doesn't have an extension add a '.' at the end.
+	 * This prevents CreateProcess from trying to append an extension.
 	 */
 	if (!strchr(bb_basename(path), '.')) {
 		new_path = xasprintf("%s.", path);
 	}
 
-	errno = 0;
-	ret = spawnve(mode, new_path ? new_path : path, new_argv, env);
-	if (errno == EINVAL && len > bb_arg_max())
-		errno = E2BIG;
+	final_path = new_path ? new_path : path;
+
+	/* Build the command line string from quoted argv */
+	for (i = 0; i < argc; i++) {
+		command = xappendword(command, new_argv[i]);
+	}
+
+	/* Convert path and command line to wide */
+	wr_path = bb_to_wcs(final_path, wpath_buf, sizeof(wpath_buf));
+	wr_cmd = bb_to_wcs(command, NULL, 0);
+
+	/* Build environment block */
+	if (env) {
+		env_block = build_env_block(env);
+	}
+	/* else: NULL env_block tells CreateProcessW to inherit OS environment */
+
+	ZeroMemory(&si, sizeof(si));
+	si.cb = sizeof(si);
+
+	if (mode == P_DETACH)
+		creation_flags = CREATE_NO_WINDOW;
+
+	creation_flags |= CREATE_UNICODE_ENVIRONMENT;
+
+	if (!CreateProcessW(wr_path.str,
+				wr_cmd.str,
+				NULL,              /* process security attributes */
+				NULL,              /* thread security attributes */
+				TRUE,              /* inherit handles */
+				creation_flags,
+				env_block,
+				NULL,              /* current directory */
+				&si,
+				&pi)) {
+		DWORD last_err = GetLastError();
+		errno = err_win_to_posix();
+		if (last_err == ERROR_INVALID_PARAMETER && len > bb_arg_max())
+			errno = E2BIG;
+		ret = -1;
+		goto done;
+	}
+
+	CloseHandle(pi.hThread);
+
+	if (mode == P_WAIT) {
+		DWORD exit_code;
+		WaitForSingleObject(pi.hProcess, INFINITE);
+		GetExitCodeProcess(pi.hProcess, &exit_code);
+		CloseHandle(pi.hProcess);
+		ret = (intptr_t)exit_code;
+	} else {
+		/* P_NOWAIT / P_DETACH: return the process handle */
+		ret = (intptr_t)pi.hProcess;
+	}
 
  done:
-	for (i = 0;i < argc;i++)
+	wcs_free(&wr_path);
+	wcs_free(&wr_cmd);
+	free(env_block);
+	free(command);
+	for (i = 0; i < argc; i++)
 		free(new_argv[i]);
 	free(new_argv);
 	free(new_path);
@@ -251,9 +345,11 @@ create_detached_process(const char *prog, char *const *argv)
 {
 	int argc, i;
 	char *command = NULL;
-	STARTUPINFO siStartInfo;
+	STARTUPINFOW siStartInfo;
 	PROCESS_INFORMATION piProcInfo;
 	int success;
+	wchar_t wprog_buf[PATH_MAX];
+	wcs_result wr_prog, wr_cmd;
 
 	argc = string_array_len((char **)argv);
 	for (i = 0; i < argc; i++) {
@@ -263,14 +359,17 @@ create_detached_process(const char *prog, char *const *argv)
 			free(qarg);
 	}
 
-	ZeroMemory(&siStartInfo, sizeof(STARTUPINFO));
-	siStartInfo.cb = sizeof(STARTUPINFO);
+	ZeroMemory(&siStartInfo, sizeof(STARTUPINFOW));
+	siStartInfo.cb = sizeof(STARTUPINFOW);
 	siStartInfo.hStdInput = (HANDLE)_get_osfhandle(STDIN_FILENO);
 	siStartInfo.hStdOutput = (HANDLE)_get_osfhandle(STDOUT_FILENO);
 	siStartInfo.dwFlags = STARTF_USESTDHANDLES;
 
-	success = CreateProcess((LPCSTR)prog,
-				(LPSTR)command,    /* command line */
+	wr_prog = bb_to_wcs(prog, wprog_buf, sizeof(wprog_buf));
+	wr_cmd = bb_to_wcs(command, NULL, 0);
+
+	success = CreateProcessW(wr_prog.str,
+				wr_cmd.str,        /* command line (mutable) */
 				NULL,              /* process security attributes */
 				NULL,              /* primary thread security attributes */
 				TRUE,              /* handles are inherited */
@@ -280,6 +379,8 @@ create_detached_process(const char *prog, char *const *argv)
 				&siStartInfo,      /* STARTUPINFO pointer */
 				&piProcInfo);      /* receives PROCESS_INFORMATION */
 
+	wcs_free(&wr_cmd);
+	wcs_free(&wr_prog);
 	if (ENABLE_FEATURE_CLEAN_UP)
 		free(command);
 
@@ -465,11 +566,21 @@ static int exit_code_to_wait_status_cmd(DWORD exit_code, const char *cmd)
 		flags = FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM;
 		if (INIT_PROC_ADDR(ntdll.dll, RtlNtStatusToDosError)) {
 			code = RtlNtStatusToDosError(exit_code);
-			if (FormatMessage(flags, NULL, code, 0, (char *)&msg, 0, NULL)) {
-				char *cr = strrchr(msg, '\r');
-				if (cr) {		// Replace CRLF with a space
-					cr[0] = ' ';
-					cr[1] = '\0';
+			{
+				wchar_t *wmsg = NULL;
+				if (FormatMessageW(flags, NULL, code, 0, (wchar_t *)&wmsg, 0, NULL) && wmsg) {
+					char mbuf[256];
+					mbs_result mr = bb_to_mbs(wmsg, mbuf, sizeof(mbuf));
+					msg = xstrdup(mr.str);
+					mbs_free(&mr);
+					LocalFree(wmsg);
+					{
+						char *cr = strrchr(msg, '\r');
+						if (cr) {		// Replace CRLF with a space
+							cr[0] = ' ';
+							cr[1] = '\0';
+						}
+					}
 				}
 			}
 		}
@@ -477,7 +588,7 @@ static int exit_code_to_wait_status_cmd(DWORD exit_code, const char *cmd)
 		if (!cmd)
 			cmd = sep = "";
 		bb_error_msg("%s%s%sError 0x%lx", cmd, sep, msg ?: "", exit_code);
-		LocalFree(msg);
+		free(msg);
 	}
 
 	// Use least significant byte as exit code, but not if it's zero
@@ -656,7 +767,7 @@ static char *get_bb_string(DWORD pid, const char *exe, char *string)
 	}
 
 	/* attempt to read the BusyBox version string */
-	my_base = (char *)GetModuleHandle(NULL);
+	my_base = (char *)GetModuleHandleW(NULL);
 	address = (char *)mlist[i] + ((char *)bb_banner - my_base);
 	if (!ReadProcessMemory(proc, address, buffer, 128, NULL)) {
 		goto finish;

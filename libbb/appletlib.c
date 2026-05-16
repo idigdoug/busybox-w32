@@ -1297,20 +1297,21 @@ get_script_content(unsigned n UNUSED_PARAM)
 
 
 #if ENABLE_BUILD_LIBBUSYBOX
-# ifdef _WIN32
+# if ENABLE_PLATFORM_MINGW32
 int lbb_wmain(wchar_t **wargv)
 # else
 int lbb_main(char **argv)
 # endif
 #else
-# ifdef _WIN32
-int wmain(int argc, wchar_t **wargv)
+# if ENABLE_PLATFORM_MINGW32
+int wmain(int argc, wchar_t **wargv);
+int wmain(int argc UNUSED_PARAM, wchar_t **wargv)
 # else
 int main(int argc UNUSED_PARAM, char **argv)
 # endif
 #endif
 {
-#ifdef _WIN32
+#if ENABLE_PLATFORM_MINGW32
 	char **argv = mingw_encoding_init(wargv);
 #endif
 #if 0
@@ -1444,12 +1445,13 @@ int main(int argc UNUSED_PARAM, char **argv)
 
 	if (windows_env()) {
 		/* remove single trailing separator from PATH */
-		for (char **envp = environ; envp && *envp; envp++) {
-			if (is_prefixed_with_case(*envp, "PATH=")) {
-				char *end = last_char_is(*envp, ';');
-				if (end && end[-1] != ';')
-					*end = '\0';
-				break;
+		char *path = getenv("PATH");
+		if (path) {
+			char *end = last_char_is(path, ';');
+			if (end && end[-1] != ';') {
+				char *newpath = xstrndup(path, end - path);
+				setenv("PATH", newpath, 1);
+				free(newpath);
 			}
 		}
 	}

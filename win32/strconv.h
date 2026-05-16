@@ -2,6 +2,8 @@
 #ifndef WIN32_STRCONV_H
 #define WIN32_STRCONV_H
 
+#include <stdbool.h>
+
 /*
  * String conversion between multibyte (char) and wide character (wchar_t)
  * strings, using a configurable code page.
