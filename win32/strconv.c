@@ -1,0 +1,241 @@
+/* vi: set sw=4 ts=4: */
+/*
+ * String conversion between multibyte (char) and wide character (wchar_t)
+ * strings, using a configurable code page.
+ */
+#include "libbb.h"
+#include "strconv.h"
+
+static UINT bb_codepage = CP_UTF8;
+
+void bb_set_codepage(UINT cp)
+{
+	bb_codepage = cp;
+}
+
+UINT bb_get_codepage(void)
+{
+	return bb_codepage;
+}
+
+/*
+ * Convert a NUL-terminated multibyte string to wide characters.
+ * Tries the caller-provided buffer first; falls back to heap allocation.
+ */
+wcs_result bb_to_wcs(const char *s, wchar_t *buf, int buf_bytes)
+{
+	wcs_result r;
+	int buf_wchars = buf_bytes / sizeof(wchar_t);
+	int n;
+
+	/* NULL input: return NULL output */
+	if (s == NULL) {
+		r.str = NULL;
+		r.need_to_free = false;
+		return r;
+	}
+
+	/* Optimistic: try to convert directly into the provided buffer */
+	if (buf_wchars > 0) {
+		n = MultiByteToWideChar(bb_codepage, 0, s, -1, buf, buf_wchars);
+		if (n > 0) {
+			r.str = buf;
+			r.need_to_free = false;
+			return r;
+		}
+		if (GetLastError() != ERROR_INSUFFICIENT_BUFFER) {
+			errno = err_win_to_posix();
+			bb_error_msg_and_die("string conversion failed");
+		}
+	}
+
+	/* Fallback: query required size, allocate, convert */
+	n = MultiByteToWideChar(bb_codepage, 0, s, -1, NULL, 0);
+	if (n == 0) {
+		errno = err_win_to_posix();
+		bb_error_msg_and_die("string conversion failed");
+	}
+	r.str = xmalloc((size_t)n * sizeof(wchar_t));
+	r.need_to_free = true;
+	MultiByteToWideChar(bb_codepage, 0, s, -1, r.str, n);
+	return r;
+}
+
+/*
+ * Convert a counted multibyte string (slen bytes, not necessarily
+ * NUL-terminated) to a NUL-terminated wide string.
+ */
+wcs_result bb_to_wcs_n(const char *s, int slen, wchar_t *buf, int buf_bytes)
+{
+	wcs_result r;
+	int buf_wchars = buf_bytes / sizeof(wchar_t);
+	int n;
+
+	/* NULL input with zero length: return NULL output */
+	if (s == NULL && slen == 0) {
+		r.str = NULL;
+		r.need_to_free = false;
+		return r;
+	}
+
+	/* Empty input: return an empty NUL-terminated wide string */
+	if (slen == 0) {
+        /* Note: Not setting str = L"" because str is mutable. */
+		if (buf_wchars > 0) {
+			r.str = buf;
+			r.need_to_free = false;
+		} else {
+			r.str = xmalloc(sizeof(wchar_t));
+			r.need_to_free = true;
+		}
+        r.str[0] = L'\0';
+		return r;
+	}
+
+	/*
+	 * Optimistic: try to convert into the provided buffer.
+	 * Reserve one wchar for the NUL terminator.
+	 */
+	if (buf_wchars > 1) {
+		n = MultiByteToWideChar(bb_codepage, 0, s, slen, buf, buf_wchars - 1);
+		if (n > 0) {
+			buf[n] = L'\0';
+			r.str = buf;
+			r.need_to_free = false;
+			return r;
+		}
+		if (GetLastError() != ERROR_INSUFFICIENT_BUFFER) {
+			errno = err_win_to_posix();
+			bb_error_msg_and_die("string conversion failed");
+		}
+	}
+
+	/* Fallback: query required size, allocate, convert */
+	n = MultiByteToWideChar(bb_codepage, 0, s, slen, NULL, 0);
+	if (n == 0) {
+		errno = err_win_to_posix();
+		bb_error_msg_and_die("string conversion failed");
+	}
+	r.str = xmalloc(((size_t)n + 1) * sizeof(wchar_t));
+	r.need_to_free = true;
+	MultiByteToWideChar(bb_codepage, 0, s, slen, r.str, n);
+	r.str[n] = L'\0';
+	return r;
+}
+
+/*
+ * Convert a NUL-terminated wide string to multibyte characters.
+ * Tries the caller-provided buffer first; falls back to heap allocation.
+ */
+mbs_result bb_to_mbs(const wchar_t *ws, char *buf, int buf_bytes)
+{
+	mbs_result r;
+	int n;
+
+	/* NULL input: return NULL output */
+	if (ws == NULL) {
+		r.str = NULL;
+		r.need_to_free = false;
+		return r;
+	}
+
+	/* Optimistic: try to convert directly into the provided buffer */
+	if (buf_bytes > 0) {
+		n = WideCharToMultiByte(bb_codepage, 0, ws, -1, buf, buf_bytes,
+				NULL, NULL);
+		if (n > 0) {
+			r.str = buf;
+			r.need_to_free = false;
+			return r;
+		}
+		if (GetLastError() != ERROR_INSUFFICIENT_BUFFER) {
+			errno = err_win_to_posix();
+			bb_error_msg_and_die("string conversion failed");
+		}
+	}
+
+	/* Fallback: query required size, allocate, convert */
+	n = WideCharToMultiByte(bb_codepage, 0, ws, -1, NULL, 0, NULL, NULL);
+	if (n == 0) {
+		errno = err_win_to_posix();
+		bb_error_msg_and_die("string conversion failed");
+	}
+	r.str = xmalloc(n);
+	r.need_to_free = true;
+	WideCharToMultiByte(bb_codepage, 0, ws, -1, r.str, n, NULL, NULL);
+	return r;
+}
+
+/*
+ * Convert a counted wide string (wlen wchar_t elements, not necessarily
+ * NUL-terminated) to a NUL-terminated multibyte string.
+ */
+mbs_result bb_to_mbs_n(const wchar_t *ws, int wlen, char *buf, int buf_bytes)
+{
+	mbs_result r;
+	int n;
+
+	/* NULL input with zero length: return NULL output */
+	if (ws == NULL && wlen == 0) {
+		r.str = NULL;
+		r.need_to_free = false;
+		return r;
+	}
+
+	/* Empty input: return an empty NUL-terminated string */
+	if (wlen == 0) {
+        /* Note: Not setting str = "" because str is mutable. */
+		if (buf_bytes > 0) {
+			r.str = buf;
+			r.need_to_free = false;
+		} else {
+			r.str = xmalloc(1);
+			r.need_to_free = true;
+		}
+        r.str[0] = '\0';
+		return r;
+	}
+
+	/*
+	 * Optimistic: try to convert into the provided buffer.
+	 * Reserve one byte for the NUL terminator.
+	 */
+	if (buf_bytes > 1) {
+		n = WideCharToMultiByte(bb_codepage, 0, ws, wlen, buf, buf_bytes - 1,
+				NULL, NULL);
+		if (n > 0) {
+			buf[n] = '\0';
+			r.str = buf;
+			r.need_to_free = false;
+			return r;
+		}
+		if (GetLastError() != ERROR_INSUFFICIENT_BUFFER) {
+			errno = err_win_to_posix();
+			bb_error_msg_and_die("string conversion failed");
+		}
+	}
+
+	/* Fallback: query required size, allocate, convert */
+	n = WideCharToMultiByte(bb_codepage, 0, ws, wlen, NULL, 0, NULL, NULL);
+	if (n == 0) {
+		errno = err_win_to_posix();
+		bb_error_msg_and_die("string conversion failed");
+	}
+	r.str = xmalloc((size_t)n + 1);
+	r.need_to_free = true;
+	WideCharToMultiByte(bb_codepage, 0, ws, wlen, r.str, n, NULL, NULL);
+	r.str[n] = '\0';
+	return r;
+}
+
+void wcs_free(wcs_result *r)
+{
+	if (r->need_to_free)
+		free(r->str);
+}
+
+void mbs_free(mbs_result *r)
+{
+	if (r->need_to_free)
+		free(r->str);
+}

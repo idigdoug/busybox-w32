@@ -1,6 +1,7 @@
 #include "libbb.h"
 #include <userenv.h>
 #include "lazyload.h"
+#include "strconv.h"
 #if ENABLE_FEATURE_EXTRA_FILE_DATA
 #include <aclapi.h>
 #endif
@@ -2603,6 +2604,52 @@ char * FAST_FUNC exe_relative_path(const char *tail)
 	char *relpath = concat_path_file(dirname(exepath), tail);
 	free(exepath);
 	return relpath;
+}
+
+HANDLE FAST_FUNC mingw_CreateFileA(const char *filename, DWORD access,
+		DWORD sharing, LPSECURITY_ATTRIBUTES sa, DWORD creation,
+		DWORD flags, HANDLE template)
+{
+	wchar_t wbuf[PATH_MAX];
+	wcs_result wr = bb_to_wcs(filename, wbuf, sizeof(wbuf));
+	HANDLE h = CreateFileW(wr.str, access, sharing, sa, creation,
+			flags, template);
+	wcs_free(&wr);
+	return h;
+}
+
+BOOL FAST_FUNC mingw_CreateProcessAsUserA(HANDLE token, const char *app,
+		const char *cmd, LPSECURITY_ATTRIBUTES pa,
+		LPSECURITY_ATTRIBUTES ta, BOOL inherit, DWORD flags,
+		LPVOID env, const char *dir, LPSTARTUPINFOA si,
+		LPPROCESS_INFORMATION pi)
+{
+	wchar_t wapp_buf[PATH_MAX];
+	wchar_t wcmd_buf[PATH_MAX];
+	wchar_t wdir_buf[PATH_MAX];
+	STARTUPINFOW siw;
+	BOOL ret;
+
+	wcs_result wapp = bb_to_wcs(app, wapp_buf, sizeof(wapp_buf));
+	wcs_result wcmd = bb_to_wcs(cmd, wcmd_buf, sizeof(wcmd_buf));
+	wcs_result wdir = bb_to_wcs(dir, wdir_buf, sizeof(wdir_buf));
+
+	/* Convert STARTUPINFOA to STARTUPINFOW */
+	memset(&siw, 0, sizeof(siw));
+	siw.cb = sizeof(siw);
+	siw.dwFlags = si->dwFlags;
+	siw.wShowWindow = si->wShowWindow;
+	siw.hStdInput = si->hStdInput;
+	siw.hStdOutput = si->hStdOutput;
+	siw.hStdError = si->hStdError;
+
+	ret = CreateProcessAsUserW(token, wapp.str, wcmd.str, pa, ta,
+			inherit, flags, env, wdir.str, &siw, pi);
+
+	wcs_free(&wapp);
+	wcs_free(&wcmd);
+	wcs_free(&wdir);
+	return ret;
 }
 
 int FAST_FUNC mingw_shell_execute(SHELLEXECUTEINFO *info)

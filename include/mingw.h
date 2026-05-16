@@ -691,3 +691,10 @@ int elevation_state(void);
 void set_interp(int i) FAST_FUNC;
 int mingw_shell_execute(SHELLEXECUTEINFO *info) FAST_FUNC;
 void mingw_die_if_error(NTSTATUS status, const char *function_name) FAST_FUNC;
+HANDLE mingw_CreateFileA(const char *filename, DWORD access, DWORD sharing,
+		LPSECURITY_ATTRIBUTES sa, DWORD creation, DWORD flags,
+		HANDLE template) FAST_FUNC;
+BOOL mingw_CreateProcessAsUserA(HANDLE token, const char *app, const char *cmd,
+		LPSECURITY_ATTRIBUTES pa, LPSECURITY_ATTRIBUTES ta,
+		BOOL inherit, DWORD flags, LPVOID env, const char *dir,
+		LPSTARTUPINFOA si, LPPROCESS_INFORMATION pi) FAST_FUNC;

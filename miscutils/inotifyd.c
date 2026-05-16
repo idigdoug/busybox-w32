@@ -230,6 +230,7 @@ int inotifyd_main(int argc, char **argv)
 	return bb_got_signal;
 }
 #else /* ENABLE_PLATFORM_MINGW32 */
+#include "strconv.h"
 /*
  * Order is important:  the indices match the values taken by the
  * Action member of the FILE_NOTIFY_INFORMATION structure, including
@@ -270,15 +271,14 @@ struct watch {
 static void run_agent(const char *agent, FILE_NOTIFY_INFORMATION *info,
 						struct watch *w)
 {
-	int len;
 	char filename[MAX_PATH];
 	char event[2];
 	const char *args[5];
+	mbs_result mr;
 
-	memset(filename, 0, sizeof(filename));
-	len = WideCharToMultiByte(CP_ACP, 0, info->FileName,
-				info->FileNameLength/2, filename, sizeof(filename),
-				NULL, NULL);
+	mr = bb_to_mbs_n(info->FileName,
+            info->FileNameLength / sizeof(wchar_t),
+			filename, sizeof(filename));
 
 	if (info->Action >= 0 && info->Action < 6 &&
 				((1 << info->Action) & w->bits)) {
@@ -287,19 +287,20 @@ static void run_agent(const char *agent, FILE_NOTIFY_INFORMATION *info,
 
 		if (LONE_CHAR(agent, '-')) {
 			/* "inotifyd - FILE": built-in echo */
-			printf(len ? "%s\t%s\t%s\n" : "%s\t%s\n",
-					event, w->dirname, filename);
+			printf(mr.str[0] ? "%s\t%s\t%s\n" : "%s\t%s\n",
+					event, w->dirname, mr.str);
 			fflush(stdout);
 		}
 		else {
 			args[0] = agent;
 			args[1] = event;
 			args[2] = w->dirname;
-			args[3] = len ? filename : NULL;
+			args[3] = mr.str[0] ? mr.str : NULL;
 			args[4] = NULL;
 			spawn_and_wait((char **)args);
 		}
 	}
+	mbs_free(&mr);
 }
 
 static BOOL start_watch(struct watch *w)
@@ -366,7 +367,8 @@ int inotifyd_main(int argc, char **argv)
 		if (!is_directory(*argv, FALSE))
 			bb_error_msg_and_die("%s: not a directory", *argv);
 
-		watch[n].hdir = CreateFile(*argv, GENERIC_READ|FILE_LIST_DIRECTORY,
+		watch[n].hdir = mingw_CreateFileA(*argv,
+                    GENERIC_READ|FILE_LIST_DIRECTORY,
 					FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE,
 					NULL, OPEN_EXISTING,
 					FILE_FLAG_BACKUP_SEMANTICS|FILE_FLAG_OVERLAPPED, NULL);
