@@ -239,3 +239,38 @@ void mbs_free(mbs_result *r)
 	if (r->need_to_free)
 		free(r->str);
 }
+
+/*
+ * Initialize encoding support: check the BB_CODEPAGE environment variable,
+ * convert wide argv to multibyte argv.  Returns a heap-allocated argv array
+ * with heap-allocated UTF-8 (or configured codepage) strings.
+ */
+char **mingw_encoding_init(wchar_t **wargv)
+{
+	wchar_t cpbuf[16];
+	char **argv;
+	int argc, i;
+
+	/* Check for a codepage override before converting argv */
+	if (GetEnvironmentVariableW(L"BB_CODEPAGE", cpbuf, ARRAY_SIZE(cpbuf))) {
+		UINT cp = (UINT)wcstoul(cpbuf, NULL, 10);
+		if (cp > 0)
+			bb_set_codepage(cp);
+	}
+
+	for (argc = 0; wargv[argc] != NULL; argc++)
+		continue;
+
+	argv = xmalloc(((size_t)argc + 1) * sizeof(char *));
+	for (i = 0; i < argc; i++) {
+		char buf[PATH_MAX];
+		mbs_result r = bb_to_mbs(wargv[i], buf, sizeof(buf));
+		if (r.need_to_free) {
+			argv[i] = r.str;
+		} else {
+			argv[i] = xstrdup(r.str);
+		}
+	}
+	argv[argc] = NULL;
+	return argv;
+}

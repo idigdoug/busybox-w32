@@ -698,3 +698,4 @@ BOOL mingw_CreateProcessAsUserA(HANDLE token, const char *app, const char *cmd,
 		LPSECURITY_ATTRIBUTES pa, LPSECURITY_ATTRIBUTES ta,
 		BOOL inherit, DWORD flags, LPVOID env, const char *dir,
 		LPSTARTUPINFOA si, LPPROCESS_INFORMATION pi) FAST_FUNC;
+char **mingw_encoding_init(wchar_t **wargv);

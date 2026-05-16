@@ -1297,11 +1297,22 @@ get_script_content(unsigned n UNUSED_PARAM)
 
 
 #if ENABLE_BUILD_LIBBUSYBOX
+# ifdef _WIN32
+int lbb_wmain(wchar_t **wargv)
+# else
 int lbb_main(char **argv)
+# endif
 #else
+# ifdef _WIN32
+int wmain(int argc, wchar_t **wargv)
+# else
 int main(int argc UNUSED_PARAM, char **argv)
+# endif
 #endif
 {
+#ifdef _WIN32
+	char **argv = mingw_encoding_init(wargv);
+#endif
 #if 0
 	/* TODO: find a use for a block of memory between end of .bss
 	 * and end of page. For example, I'm getting "_end:0x812e698 2408 bytes"

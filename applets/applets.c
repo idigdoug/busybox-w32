@@ -9,8 +9,15 @@
 #include "busybox.h"
 
 #if ENABLE_BUILD_LIBBUSYBOX
+# ifdef _WIN32
+int wmain(int argc UNUSED_PARAM, wchar_t **wargv)
+{
+	return lbb_wmain(wargv);
+}
+# else
 int main(int argc UNUSED_PARAM, char **argv)
 {
 	return lbb_main(argv);
 }
+# endif
 #endif

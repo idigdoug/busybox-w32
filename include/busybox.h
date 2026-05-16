@@ -47,9 +47,17 @@ extern const uint8_t applet_install_loc[] ALIGN1;
  */
 #if ENABLE_BUILD_LIBBUSYBOX
 #if ENABLE_FEATURE_SHARED_BUSYBOX
+# ifdef _WIN32
+int lbb_wmain(wchar_t **wargv) EXTERNALLY_VISIBLE;
+# else
 int lbb_main(char **argv) EXTERNALLY_VISIBLE;
+# endif
 #else
+# ifdef _WIN32
+int lbb_wmain(wchar_t **wargv);
+# else
 int lbb_main(char **argv);
+# endif
 #endif
 #endif
 

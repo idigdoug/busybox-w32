@@ -11,11 +11,23 @@ const char *applet_name;
 #include <stdlib.h>
 #include "usage.h"
 
+#ifdef _WIN32
+#include <wchar.h>
+char **mingw_encoding_init(wchar_t **wargv);
+
+int wmain(int argc, wchar_t **wargv)
+{
+	char **argv = mingw_encoding_init(wargv);
+	applet_name = argv[0];
+	return APPLET_main(argc, argv);
+}
+#else
 int main(int argc, char **argv)
 {
 	applet_name = argv[0];
 	return APPLET_main(argc, argv);
 }
+#endif
 
 void bb_show_usage(void)
 {
