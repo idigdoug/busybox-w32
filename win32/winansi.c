@@ -8,7 +8,6 @@
 #include "strconv.h"
 #undef PACKED
 
-static BOOL charToConBuffA(LPSTR s, DWORD len);
 
 static int conv_fwriteCon(FILE *stream, char *buf, size_t siz);
 static int conv_writeCon(int fd, char *buf, size_t siz);
@@ -87,14 +86,6 @@ int FAST_FUNC terminal_mode(int reset)
 {
 	static int mode = -1;
 
-#if ENABLE_FEATURE_EURO
-	if (mode < 0) {
-		if (GetConsoleCP() == 850 && GetConsoleOutputCP() == 850) {
-			SetConsoleCP(858);
-			SetConsoleOutputCP(858);
-		}
-	}
-#endif
 
 	if (mode < 0 || reset) {
 		HANDLE h;
@@ -735,44 +726,19 @@ static char *process_escape(char *pos)
 	return (char *)func + 1;
 }
 
-static BOOL charToConBuffA(LPSTR s, DWORD len)
-{
-	UINT cp = bb_get_codepage(), conocp = GetConsoleOutputCP();
-	CPINFO cp_info, con_info;
-	WCHAR *buf;
-
-	if (cp == conocp)
-		return TRUE;
-
-	if (!s || !GetCPInfo(cp, &cp_info) || !GetCPInfo(conocp, &con_info) ||
-			con_info.MaxCharSize > cp_info.MaxCharSize ||
-			(len == 1 && cp_info.MaxCharSize != 1))
-		return FALSE;
-
-	terminal_mode(FALSE);
-	buf = xmalloc(len*sizeof(WCHAR));
-	MultiByteToWideChar(cp, 0, s, len, buf, len);
-	WideCharToMultiByte(conocp, 0, buf, len, s, len, NULL, NULL);
-	free(buf);
-	return TRUE;
-}
 
 BOOL FAST_FUNC conToCharBuffA(LPSTR s, DWORD len)
 {
 	UINT cp = bb_get_codepage(), conicp = GetConsoleCP();
-	CPINFO cp_info, con_info;
+	UINT cp_maxchar = bb_get_codepage_max_charsize();
+	CPINFO con_info;
 	WCHAR *buf;
 
-	if (cp == conicp
-#if ENABLE_FEATURE_UTF8_INPUT
-			// if cp is UTF8 then we got UTF8 via readConsoleInput_utf8
-			|| cp == CP_UTF8
-#endif
-		)
+	if (cp == conicp)
 		return TRUE;
 
-	if (!s || !GetCPInfo(cp, &cp_info) || !GetCPInfo(conicp, &con_info) ||
-			cp_info.MaxCharSize > con_info.MaxCharSize ||
+	if (!s || !GetCPInfo(conicp, &con_info) ||
+			cp_maxchar > con_info.MaxCharSize ||
 			(len == 1 && con_info.MaxCharSize != 1))
 		return FALSE;
 
@@ -1215,353 +1181,162 @@ int FAST_FUNC mingw_isatty(int fd)
 	return result;
 }
 
-#if ENABLE_FEATURE_UTF8_INPUT
-// intentionally also converts invalid values (surrogate halfs, too big)
-static int toutf8(DWORD cp, unsigned char *buf) {
-	if (cp <= 0x7f) {
-		*buf = cp;
-		return 1;
-	}
-	if (cp <= 0x7ff) {
-		*buf++ = 0xc0 |  (cp >>  6);
-		*buf   = 0x80 |  (cp        & 0x3f);
-		return 2;
-	}
-	if (cp <= 0xffff) {
-		*buf++ = 0xe0 |  (cp >> 12);
-		*buf++ = 0x80 | ((cp >>  6) & 0x3f);
-		*buf   = 0x80 |  (cp        & 0x3f);
-		return 3;
-	}
-	if (cp <= 0x10ffff) {
-		*buf++ = 0xf0 |  (cp >> 18);
-		*buf++ = 0x80 | ((cp >> 12) & 0x3f);
-		*buf++ = 0x80 | ((cp >>  6) & 0x3f);
-		*buf   = 0x80 |  (cp        & 0x3f);
-		return 4;
-	}
-	// invalid. returning 0 works in our context because it's delivered
-	// as a key event, where 0 values are typically ignored by the caller
-	*buf = 0;
-	return 1;
-}
-
-// peek into the console input queue and try to find a key-up event of
-// a surrugate-2nd-half, at which case eat the console events up to this
-// one (excluding), and combine the pair values into *ph1
-static void maybeEatUpto2ndHalfUp(HANDLE h, DWORD *ph1)
-{
-	// Peek into the queue arbitrary 16 records deep
-	INPUT_RECORD r[16];
-	DWORD got;
-	int i;
-
-	if (!PeekConsoleInputW(h, r, 16, &got))
-		return;
-
-	// we're conservative, and abort the search on anything which
-	// seems out of place, like non-key event, non-2nd-half, etc.
-	// search from 1 because i==0 is still the 1st half down record.
-	for (i = 1; i < got; ++i) {
-		DWORD h2;
-		int is2nd, isdown;
-
-		if (r[i].EventType != KEY_EVENT)
-			return;
-
-		isdown = r[i].Event.KeyEvent.bKeyDown;
-		h2 = r[i].Event.KeyEvent.uChar.UnicodeChar;
-		is2nd = h2 >= 0xDC00 && h2 <= 0xDFFF;
-
-		// skip 0 values, keyup of 1st half, and keydown of a 2nd half, if any
-		if (!h2 || (h2 == *ph1 && !isdown) || (is2nd && isdown))
-			continue;
-
-		if (!is2nd)
-			return;
-
-		// got 2nd-half-up. eat the events up to this, combine the values
-		ReadConsoleInputW(h, r, i, &got);
-		*ph1 = 0x10000 + (((*ph1 & ~0xD800) << 10) | (h2 & ~0xDC00));
-		return;
-	}
-}
-
-// if the codepoint is a key-down event, remember it, else if
-// it's a key-up event with matching prior down - forget the down,
-// else (up without matching prior key-down) - change it to down.
-// We remember few prior key-down events so that a sequence
-// like X-down Y-down X-up Y-up won't trigger this hack for Y-up.
-// When up is changed into down there won't be further key-up event,
-// but that's OK because the caller ignores key-up events anyway.
-static void maybe_change_up_to_down(wchar_t key, BOOL *isdown)
-{
-	#define DOWN_BUF_SIZ 8
-	static wchar_t downbuf[DOWN_BUF_SIZ] = {0};
-	static int pos = 0;
-
-	if (*isdown) {
-		downbuf[pos++] = key;
-		pos = pos % DOWN_BUF_SIZ;
-		return;
-	}
-
-	// the missing-key-down issue was only observed with unicode values,
-	// so limit this hack to non-ASCII-7 values.
-	// also, launching a new shell/read process from CLI captures
-	// an ENTER-up event without prior down at this new process, which
-	// would otherwise change it to down - creating a wrong ENTER keypress.
-	if (key <= 127)
-		return;
-
-	// key up, try to match a prior down
-	for (int i = 0; i < DOWN_BUF_SIZ; ++i) {
-		if (downbuf[i] == key) {
-			downbuf[i] = 0;  // "forget" this down
-			return;
-		}
-	}
-
-	// no prior key-down - replace the up with down
-	*isdown = TRUE;
-}
-
 /*
- * readConsoleInput_utf8 behaves similar enough to ReadConsoleInputA when
- * the console (input) CP is UTF8, but addressed two issues:
- * - It depend on the console CP, while we use ReadConsoleInputW internally.
- * - ReadConsoleInputA with Console CP of UTF8 (65001) is buggy:
- *   - Doesn't work on Windows 7 (reads 0 or '?' for non-ASCII codepoints).
- *   - When used at the cmd.exe console - but not Windows Terminal:
- *     sometimes only key-up events arrive without the expected prior key-down.
- *     Seems to depend both on the console CP and the entered/pasted codepoint.
- *   - If reading one record at a time (which is how we use it), then input
- *     codepoints of U+0800 or higher crash the console/terminal window.
- *     (tested on Windows 10.0.19045.3086: console and Windows Terminal 1.17)
- *     Example: U+0C80 (UTF8: 0xE0 0xB2 0x80): "ಀ"
- *     Example: U+1F600 (UTF8: 0xF0 0x9F 0x98 0x80): "😀"
- *   - If reading more than one record at a time:
- *     - Unknown whether it can still crash in some cases (was not observed).
- *     - Codepoints above U+FFFF are broken, and arrive as
- *       U+FFFD REPLACEMENT CHARACTER "�"
- * - Few more codepoints to test the issues above (and below):
- *   - U+0500 (UTF8: 0xD4, 0x80): "Ԁ"  (OK in UTF8 CP, else maybe no key-down)
- *   - U+07C0 (UTF8: 0xDF, 0x80): "߀"  (might exhibit missing key-down)
+ * Write multibyte string to console using WriteConsoleW.  Decodes the
+ * internal encoding (bb_get_codepage()) to codepoints, converts to UTF-16,
+ * and writes.  Handles arbitrary split boundaries across calls by keeping
+ * state for incomplete multi-byte sequences.
  *
- * So this function uses ReadConsoleInputW and then delivers it as UTF8:
- * - Works with any console CP, in Windows terminal and Windows 7/10 console.
- * - Surrogate pairs are combined and delivered as a single UTF8 codepoint.
- *   - Ignore occasional intermediate control events between the halfs.
- *   - If we can't find the 2nd half, or if for some reason we get a 2nd half
- *     wiithout the 1st, deliver the half we got as UTF8 (a-la WTF8).
- * - The "sometimes key-down is missing" issue at the cmd.exe console happens
- *   also when using ReadConsoleInputW (for U+0080 or higher), so handle it.
- *   This can also happen with surrogate pairs.
- * - Up to 4-bytes state is maintained for a single UTF8 codepoint buffer.
+ * Supports SBCS, DBCS, and UTF-8 codepages.  For BB_CP_OTHER, falls back
+ * to MultiByteToWideChar on the whole buffer (no cross-call state).
  *
- * Gotchas (could be solved, but currently there's no need):
- * - We support reading one record at a time, else fail - to make it obvious.
- * - We have a state which is hidden from PeekConsoleInput - so not in sync.
- * - We don't deliver key-up events in some cases: when working around
- *   the "missing key-down" issue, and with combined surrogate halfs value.
+ * Returns 0 on success, -1 on error.
  */
-BOOL FAST_FUNC
-readConsoleInput_utf8(HANDLE h, INPUT_RECORD *r, DWORD len, DWORD *got)
+static int writeCon_wide(int fd, const char *buf, size_t siz)
 {
-	static unsigned char u8buf[4];  // any single codepoint in UTF8
-	static int u8pos = 0, u8len = 0;
-	static INPUT_RECORD srec;
+	/* State between calls for incomplete multibyte sequences */
+	static unsigned char pending_bytes[4];
+	static int pending_len = 0;
+	/* UTF-8 decoder state */
+	static int utf8_state = 0;  /* 0-3: remaining continuation bytes */
+	static int utf8_tail = 0;   /* initial continuation count for overlong check */
+	static uint32_t utf8_codepoint = 0;
 
-	if (len != 1)
-		return FALSE;
-
-	// if ACP is UTF8 then we read UTF8 regardless of console (in) CP
-	if (GetConsoleCP() != CP_UTF8 && bb_get_codepage() != CP_UTF8)
-		return ReadConsoleInput(h, r, len, got);
-
-	if (u8pos == u8len) {
-		DWORD codepoint;
-
-		// wait-and-peek rather than read to keep the last processed record
-		// at the console queue until we deliver all of its products, so
-		// that external WaitForSingleObject(h) shows there's data ready.
-		if (WaitForSingleObject(h, INFINITE) != WAIT_OBJECT_0)
-			return FALSE;
-		if (!PeekConsoleInputW(h, r, 1, got))
-			return FALSE;
-		if (*got == 0)
-			return TRUE;
-		if (r->EventType != KEY_EVENT)
-			return ReadConsoleInput(h, r, 1, got);
-
-		srec = *r;
-		codepoint = srec.Event.KeyEvent.uChar.UnicodeChar;
-
-		// Observed when pasting unicode at cmd.exe console (but not
-		// windows terminal), we sometimes get key-up event without
-		// a prior matching key-down (or with key-down codepoint 0),
-		// so this call would change the up into down in such case.
-		// E.g. pastes fixed by this hack: U+1F600 "😀", or U+0C80 "ಀ"
-		if (codepoint)
-			maybe_change_up_to_down(codepoint, &srec.Event.KeyEvent.bKeyDown);
-
-		// if it's a 1st (high) surrogate pair half, try to eat upto and
-		// excluding the 2nd (low) half, and combine them into codepoint.
-		// this does not interfere with the missing-key-down workaround
-		// (no issue if the down-buffer has 1st-half-down without up).
-		if (codepoint >= 0xD800 && codepoint <= 0xDBFF)
-			maybeEatUpto2ndHalfUp(h, &codepoint);
-
-		u8len = toutf8(codepoint, u8buf);
-		u8pos = 0;
-	}
-
-	*r = srec;
-	r->Event.KeyEvent.uChar.AsciiChar = (char)u8buf[u8pos++];
-	if (u8pos == u8len)  // consume the record which generated this buffer
-		ReadConsoleInputW(h, &srec, 1, got);
-	*got = 1;
-	return TRUE;
-}
-#else
-/*
- * In Windows 10 and 11 using ReadConsoleInputA() with a console input
- * code page of CP_UTF8 can crash the console/terminal.  Avoid this by
- * using ReadConsoleInputW() in that case.
- */
-/* FIXME: the behavior is correct, but the name (..._utf8) is not.
- *        this is a plain ReadConsoleInputA, with breaking workaround when
- *        the console input CP is UTF8 (i.e. if the user did "chcp 65001").
- *        The other implementation of this name (with FEATURE_UTF8_INPUT)
- *        does match the name correctly.
- *        For best behavior when unicode is disabled (utf8 manifest is not
- *        in effect) the user should set the console CP to the system ACP,
- *        e.g. on en-US system, run "chcp 1252" (default with en-US is 437).
- */
-BOOL FAST_FUNC
-readConsoleInput_utf8(HANDLE h, INPUT_RECORD *r, DWORD len, DWORD *got)
-{
-	if (GetConsoleCP() != CP_UTF8)
-		return ReadConsoleInput(h, r, len, got);
-
-	if (ReadConsoleInputW(h, r, len, got)) {
-		wchar_t uchar = r->Event.KeyEvent.uChar.UnicodeChar;
-		char achar = uchar & 0x7f;
-		if (achar != uchar)
-			achar = '?';
-		r->Event.KeyEvent.uChar.AsciiChar = achar;
-		return TRUE;
-	}
-	return FALSE;
-}
-#endif
-
-#if ENABLE_FEATURE_UTF8_OUTPUT
-// Write u8buf as if the console output CP is UTF8 - regardless of the CP.
-// fd should be associated with a console output.
-// Return: 0 on successful write[s], else -1 (e.g. if fd is not a console).
-//
-// Up to 3 bytes of an incomplete codepoint may be buffered from prior call[s].
-// All the completed codepoints in one call are written using WriteConsoleW.
-// Bad sequence of any length (till ASCII7 or UTF8 lead) prints 1 subst wchar.
-//
-// note: one console is assumed, and the (3 bytes) buffer is shared regardless
-//       of the original output stream (stdout/err), or even if the handle is
-//       of a different console. This can result in invalid codepoints output
-//       if streams are multiplexed mid-codepoint (same as elsewhere?)
-static int writeCon_utf8(int fd, const char *u8buf, size_t u8siz)
-{
-	// state during/between calls
-	static int state = 0;  // 0-3: remaining cp bytes (0: done/new)
-	static int tail = 0;  // init like state, used for overlong rejection
-	static uint32_t codepoint = 0;  // accumulated from up to 4 UTF8 bytes
-
-	// wbuf is not a state, but it's kept between calls to avoid repeated
-	// malloc/free. 4096 was chosen empirically to reach diminishing
-	// returns at the size/speed curve. 8192 is still slightly faster.
-	static const int wbufwsiz = 4096;  // at least 2
-	static wchar_t *wbuf = 0;
+	/* Wide output buffer — kept between calls to avoid repeated alloc */
+	static const int wbuf_size = 4096;
+	static wchar_t *wbuf = NULL;
 
 	HANDLE h = (HANDLE)_get_osfhandle(fd);
+	DWORD nwritten;
 	int wlen = 0;
-
-	// unused. XP requires non-NULL arg, if we ever support Unicode on XP
-	DWORD nwritten = 0;
+	enum bb_codepage_type cp_type = bb_get_codepage_type();
 
 	if (!wbuf)
-		wbuf = xmalloc(wbufwsiz * sizeof(wchar_t));
+		wbuf = xmalloc(wbuf_size * sizeof(wchar_t));
 
-	// ASCII7 uses least logic, then UTF8 continuations, UTF8 lead, errors
-	while (u8siz--) {
-		unsigned char c = *u8buf++;
-		int topbits = 0;
+	if (cp_type == BB_CP_OTHER) {
+		/* Fallback: convert entire buffer at once, no cross-call state.
+		 * May produce substitution chars at split boundaries. */
+		int n = MultiByteToWideChar(bb_get_codepage(), 0, buf, siz, wbuf, wbuf_size);
+		if (n > 0) {
+			if (!WriteConsoleW(h, wbuf, n, &nwritten, 0))
+				return -1;
+		}
+		return 0;
+	}
 
-		while (c & (0x80 >> topbits))
-			++topbits;
+	while (siz--) {
+		unsigned char c = (unsigned char)*buf++;
+		uint32_t codepoint = 0;
+		int complete = 0;
 
-		if (state == 0 && topbits == 0) {
-			// valid ASCII7, state remains 0
+		switch (cp_type) {
+		case BB_CP_SBCS:
+			/* Every byte is a complete character */
 			codepoint = c;
+			complete = 1;
+			break;
 
-		} else if (state > 0 && topbits == 1) {
-			// valid continuation/final byte (2/3/4 bytes UTF8)
-			// min value for 1/2/3/4 bytes UTF-8 (cpmin[0] is unused)
-			static const uint32_t cpmin[] = {0, 0x80, 0x800, 0x10000};
+		case BB_CP_DBCS:
+			if (pending_len == 0) {
+				if (bb_is_lead_byte(c)) {
+					pending_bytes[0] = c;
+					pending_len = 1;
+				} else {
+					/* Single-byte character: convert via API */
+					wchar_t wc;
+					char cb = (char)c;
+					if (MultiByteToWideChar(bb_get_codepage(), 0,
+							&cb, 1, &wc, 1) == 1) {
+						codepoint = wc;
+					} else {
+						codepoint = CONFIG_SUBST_WCHAR;
+					}
+					complete = 1;
+				}
+			} else {
+				/* Trail byte: convert the 2-byte sequence */
+				wchar_t wc;
+				pending_bytes[1] = c;
+				if (MultiByteToWideChar(bb_get_codepage(), 0,
+						(char *)pending_bytes, 2, &wc, 1) == 1) {
+					codepoint = wc;
+				} else {
+					codepoint = CONFIG_SUBST_WCHAR;
+				}
+				pending_len = 0;
+				complete = 1;
+			}
+			break;
 
-			codepoint = (codepoint << 6) | (c & 0x3f);
-			if (--state)
-				continue;
+		case BB_CP_UTF8: {
+			int topbits = 0;
+			while (c & (0x80 >> topbits))
+				++topbits;
 
-			// done. ensure codepoint is not too small (overlong
-			// with 2/3/4 bytes), and not too big (with 4 bytes).
-			// can be optimized further, with longer explanation:
-			//   if ((codepoint - cpmin[tail]) & ~0xfffffu) ...
-			if (codepoint < cpmin[tail] || codepoint > 0x10ffff)
+			if (utf8_state == 0 && topbits == 0) {
+				/* Valid ASCII7 */
+				codepoint = c;
+				complete = 1;
+			} else if (utf8_state > 0 && topbits == 1) {
+				/* Valid continuation byte */
+				static const uint32_t cpmin[] = {0, 0x80, 0x800, 0x10000};
+				utf8_codepoint = (utf8_codepoint << 6) | (c & 0x3f);
+				if (--utf8_state == 0) {
+					if (utf8_codepoint < cpmin[utf8_tail]
+					 || utf8_codepoint > 0x10ffff)
+						utf8_codepoint = CONFIG_SUBST_WCHAR;
+					codepoint = utf8_codepoint;
+					complete = 1;
+				}
+			} else if (utf8_state == 0 && topbits >= 2 && topbits <= 4) {
+				/* Valid UTF8 lead byte */
+				utf8_codepoint = c & (0x7f >> topbits);
+				utf8_tail = utf8_state = topbits - 1;
+			} else {
+				/* Invalid byte in this state */
 				codepoint = CONFIG_SUBST_WCHAR;
+				utf8_state = 0;
+				complete = 1;
+				/* If byte is valid for state 0, reprocess it */
+				if (topbits < 5 && topbits != 1) {
+					--buf;
+					++siz;
+				}
+			}
+			break;
+		}
+		default:
+			break;
+		}
 
-		} else if (state == 0 && topbits >= 2 && topbits <= 4) {
-			// valid UTF8 lead of 2/3/4 bytes codepoint
-			codepoint = c & (0x7f >> topbits);
-			tail = state = topbits - 1; // expected bytes after lead
+		if (!complete)
 			continue;
 
-		} else {
-			// invalid in this state: print '?', reset decoding.
-			codepoint = CONFIG_SUBST_WCHAR;  // '?' or '�'
-			state = 0;
-
-			// and if this byte is valid for state 0 (can happen
-			// at state!=0), then reprocess it from scratch.
-			if (topbits < 5 && topbits != 1) {
-				--u8buf;
-				++u8siz;
-			}
-		}
-
-		// codepoint is complete
-		// we don't reject surrogate halves, reserved, etc
+		/* Emit codepoint as UTF-16 */
 		if (codepoint < 0x10000) {
-			wbuf[wlen++] = codepoint;
+			wbuf[wlen++] = (wchar_t)codepoint;
 		} else {
-			// generate a surrogates pair (wbuf has room for 2+)
 			codepoint -= 0x10000;
-			wbuf[wlen++] = 0xd800 | (codepoint >> 10);
-			wbuf[wlen++] = 0xdc00 | (codepoint & 0x3ff);
+			wbuf[wlen++] = 0xD800 | (codepoint >> 10);
+			wbuf[wlen++] = 0xDC00 | (codepoint & 0x3FF);
 		}
 
-		// flush if we have less than two empty spaces
-		if (wlen > wbufwsiz - 2) {
+		/* Flush when buffer is nearly full */
+		if (wlen > wbuf_size - 2) {
 			if (!WriteConsoleW(h, wbuf, wlen, &nwritten, 0))
 				return -1;
 			wlen = 0;
 		}
 	}
 
-	if (wlen && (!WriteConsoleW(h, wbuf, wlen, &nwritten, 0)))
-		return -1;
+	/* Flush remaining */
+	if (wlen > 0) {
+		if (!WriteConsoleW(h, wbuf, wlen, &nwritten, 0))
+			return -1;
+	}
 	return 0;
 }
-#endif
 
 void FAST_FUNC console_write(const char *str, int len)
 {
@@ -1591,56 +1366,22 @@ static int conout_conv_enabled(void)
 	return enabled;
 }
 
-// TODO: improvements:
-//
-// 1. currently conv_[f]writeCon modify buf inplace, which means the caller
-// typically has to make a writable copy first just for this.
-// Sometimes it allocates a big copy once, and calls us with substrings.
-// Instead, we could make a writable copy here - it's not used later anyway.
-// To avoid the performance hit of many small allocations, we could use
-// a local buffer for short strings, and allocate only if it doesn't fit
-// (or maybe just reuse the local buffer with substring iterations).
-//
-// 2. Instead of converting from ACP to the console out CP - which guarantees
-// potential data-loss if they differ, we could convert it to wchar_t and
-// write it using WriteConsoleW. This should prevent all output data-loss.
-// care should be taken with DBCS codepages (e.g. 936) or other multi-byte
-// because then converting on arbitrary substring boundaries can fail.
-
-// convert buf inplace from ACP to console out CP and write it to stream
+// Convert buf from internal encoding and write to console via WriteConsoleW.
 // returns EOF on error, 0 on success
 static int conv_fwriteCon(FILE *stream, char *buf, size_t siz)
 {
 	if (conout_conv_enabled()) {
-#if ENABLE_FEATURE_UTF8_OUTPUT
-		int cp = bb_get_codepage();
-		if (cp == CP_UTF8 && GetConsoleOutputCP() != CP_UTF8) {
-			fflush(stream);  // writeCon_utf8 is unbuffered
-			return writeCon_utf8(fileno(stream), buf, siz) ? EOF : 0;
-		}
-		if (cp != CP_UTF8)
-			charToConBuffA(buf, siz);
-#else
-		charToConBuffA(buf, siz);
-#endif
+		fflush(stream);
+		return writeCon_wide(fileno(stream), buf, siz) ? EOF : 0;
 	}
 	return fwrite(buf, 1, siz, stream) < siz ? EOF : 0;
 }
 
 // similar to above, but using lower level write
-// returns -1 on error, actually-written bytes on suceess
+// returns -1 on error, actually-written bytes on success
 static int conv_writeCon(int fd, char *buf, size_t siz)
 {
-	if (conout_conv_enabled()) {
-#if ENABLE_FEATURE_UTF8_OUTPUT
-		int cp = bb_get_codepage();
-		if (cp == CP_UTF8 && GetConsoleOutputCP() != CP_UTF8)
-			return writeCon_utf8(fd, buf, siz) ? -1 : siz;
-		if (cp != CP_UTF8)
-			charToConBuffA(buf, siz);
-#else
-		charToConBuffA(buf, siz);
-#endif
-	}
+	if (conout_conv_enabled())
+		return writeCon_wide(fd, buf, siz) ? -1 : siz;
 	return write(fd, buf, siz);
 }

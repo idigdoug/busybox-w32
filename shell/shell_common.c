@@ -224,6 +224,18 @@ shell_builtin_read(struct builtin_read_params *params)
 #if ENABLE_PLATFORM_MINGW32
 		if (isatty(fd)) {
 			int64_t key;
+			static char key_bytes[8];
+			static int key_bytes_pos = 0, key_bytes_len = 0;
+
+			/* Drip-feed remaining bytes from a previous multi-byte key */
+			if (key_bytes_pos < key_bytes_len) {
+				if ((bufpos & 0xff) == 0)
+					buffer = xrealloc(buffer, bufpos + 0x101);
+				buffer[bufpos] = key_bytes[key_bytes_pos++];
+				/* continuation bytes won't match any ASCII delimiter,
+				 * so fall through to normal processing */
+				goto mingw_have_byte;
+			}
 
 			key = windows_read_key(fd, NULL, timeout);
 			if (key == 0x03) {
@@ -249,11 +261,36 @@ shell_builtin_read(struct builtin_read_params *params)
 				}
 				goto loop;
 			}
-			buffer[bufpos] = key == '\r' ? '\n' : key;
-			if (!(read_flags & BUILTIN_READ_SILENT)) {
-				/* echo input if not in silent mode */
-				console_write(buffer + bufpos, 1);
+
+			if (key == '\r')
+				key = '\n';
+
+			/* Encode codepoint to target encoding */
+			if (key <= 0x7F) {
+				/* ASCII: fast path */
+				if ((bufpos & 0xff) == 0)
+					buffer = xrealloc(buffer, bufpos + 0x101);
+				buffer[bufpos] = (char)key;
+				if (!(read_flags & BUILTIN_READ_SILENT))
+					console_write(buffer + bufpos, 1);
+			} else {
+				int mblen = windows_codepoint_to_mbs(
+					(uint32_t)key, key_bytes, sizeof(key_bytes));
+				if (mblen <= 0) {
+					key_bytes[0] = '?';
+					mblen = 1;
+				}
+				key_bytes_len = mblen;
+				key_bytes_pos = 1;  /* first byte goes out now */
+
+				if ((bufpos & 0xff) == 0)
+					buffer = xrealloc(buffer, bufpos + 0x101);
+				buffer[bufpos] = key_bytes[0];
+
+				if (!(read_flags & BUILTIN_READ_SILENT))
+					console_write(key_bytes, mblen);
 			}
+ mingw_have_byte:
 		} else {
 			/* Don't poll if timeout is -1, it hurts performance.  The
 			 * caution above about interrupts isn't relevant on Windows

@@ -43,6 +43,32 @@ void bb_set_codepage(UINT cp);
 UINT bb_get_codepage(void);
 
 /*
+ * Codepage encoding type classification.
+ */
+enum bb_codepage_type {
+	BB_CP_SBCS,     /* Single-byte: every byte is one character */
+	BB_CP_DBCS,     /* Double-byte: lead bytes start 2-byte sequences */
+	BB_CP_UTF8,     /* UTF-8: 1-4 byte sequences with well-known structure */
+	BB_CP_OTHER,    /* Other multi-byte (e.g. GB18030): not yet handled */
+};
+
+/*
+ * Returns the classification of the current codepage.
+ */
+enum bb_codepage_type bb_get_codepage_type(void);
+
+/*
+ * Returns MaxCharSize for the current codepage (cached from GetCPInfo).
+ */
+UINT bb_get_codepage_max_charsize(void);
+
+/*
+ * For DBCS codepages, returns TRUE if 'c' is a lead byte.
+ * Returns FALSE for non-DBCS codepages or non-lead bytes.
+ */
+BOOL bb_is_lead_byte(unsigned char c);
+
+/*
  * Convert a NUL-terminated multibyte string to wide characters.
  * buf/buf_bytes: caller-provided buffer and its size in bytes.
  * If buf_bytes is 0, a heap buffer is always allocated.

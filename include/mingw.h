@@ -166,8 +166,8 @@ IMPL(setlinebuf, void, ,FILE *fd UNUSED_PARAM)
 BOOL conToCharBuffA(LPSTR d, DWORD len) FAST_FUNC;
 BOOL conToCharA(LPSTR d);
 
-// same as ReadConsoleInputA, but delivers UTF8 regardless of console CP
-BOOL readConsoleInput_utf8(HANDLE h, INPUT_RECORD *r, DWORD len, DWORD *got) FAST_FUNC;
+UINT bb_get_codepage(void);
+int windows_codepoint_to_mbs(uint32_t codepoint, char *buf, int buf_bytes) FAST_FUNC;
 
 void set_title(const char *str) FAST_FUNC;
 int get_title(char *buf, int len) FAST_FUNC;

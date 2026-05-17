@@ -8,15 +8,68 @@
 #include <assert.h>
 
 static UINT bb_codepage = CP_UTF8;
+static enum bb_codepage_type bb_cp_type = BB_CP_UTF8;
+static UINT bb_cp_max_charsize = 4; /* MaxCharSize for current codepage */
+/* Lead byte table for DBCS: 256-bit bitmap, indexed by byte value */
+static unsigned char bb_lead_byte_map[32];
 
 void bb_set_codepage(UINT cp)
 {
+	CPINFO info;
+
+	memset(bb_lead_byte_map, 0, sizeof(bb_lead_byte_map));
+
+	if (cp == CP_UTF8) {
+		bb_codepage = cp;
+		bb_cp_type = BB_CP_UTF8;
+		bb_cp_max_charsize = 4;
+		return;
+	}
+
+	if (!GetCPInfo(cp, &info)) {
+		bb_error_msg("codepage %u is not supported, keeping %u",
+				cp, bb_codepage);
+		return;
+	}
+
 	bb_codepage = cp;
+	bb_cp_max_charsize = info.MaxCharSize;
+
+	if (info.MaxCharSize == 1) {
+		bb_cp_type = BB_CP_SBCS;
+	} else if (info.MaxCharSize == 2) {
+		bb_cp_type = BB_CP_DBCS;
+		/* Build lead byte bitmap from the LeadByte ranges.
+		 * LeadByte is an array of pairs [low, high], terminated by [0,0]. */
+		for (int i = 0; i < MAX_LEADBYTES && info.LeadByte[i]; i += 2) {
+			for (unsigned c = info.LeadByte[i]; c <= info.LeadByte[i+1]; c++)
+				bb_lead_byte_map[c >> 3] |= (1 << (c & 7));
+		}
+	} else {
+		bb_cp_type = BB_CP_OTHER;
+	}
 }
 
 UINT bb_get_codepage(void)
 {
 	return bb_codepage;
+}
+
+enum bb_codepage_type bb_get_codepage_type(void)
+{
+	return bb_cp_type;
+}
+
+UINT bb_get_codepage_max_charsize(void)
+{
+	return bb_cp_max_charsize;
+}
+
+BOOL bb_is_lead_byte(unsigned char c)
+{
+	if (bb_cp_type != BB_CP_DBCS)
+		return FALSE;
+	return (bb_lead_byte_map[c >> 3] & (1 << (c & 7))) != 0;
 }
 
 /*
