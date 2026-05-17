@@ -5,6 +5,7 @@
  */
 #include "libbb.h"
 #include "strconv.h"
+#include <assert.h>
 
 static UINT bb_codepage = CP_UTF8;
 
@@ -272,5 +273,10 @@ char **mingw_encoding_init(wchar_t **wargv)
 		}
 	}
 	argv[argc] = NULL;
+ 
+    /* getopt() expects __argv to be set. */
+	assert(__argv == NULL);
+	__argv = argv;
+
 	return argv;
 }

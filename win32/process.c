@@ -158,37 +158,73 @@ find_first_executable(const char *name)
 }
 
 /*
- * Build a wide environment block from a char** array of "NAME=VALUE" strings.
- * The result is a NUL-separated, double-NUL-terminated wide string suitable
- * for CreateProcessW.  Caller must free() the returned pointer.
+ * Build a wide argv array from a char** array.
+ * Returns a NULL-terminated wchar_t** array.  Caller must free each
+ * element and the array itself.
  */
-static wchar_t *build_env_block(char *const *env)
+static wchar_t **build_wide_argv(char *const *argv)
+{
+	int i, argc;
+	wchar_t **wargv;
+
+	argc = string_array_len((char **)argv);
+	wargv = xmalloc(((size_t)argc + 1) * sizeof(wchar_t *));
+	for (i = 0; i < argc; i++) {
+		wcs_result wr = bb_to_wcs(argv[i], NULL, 0);
+		wargv[i] = wr.str;
+	}
+	wargv[argc] = NULL;
+	return wargv;
+}
+
+/*
+ * Build a wide environment array from the OS process environment.
+ * Returns a NULL-terminated wchar_t** array suitable for _wspawnve.
+ * Caller must free the returned pointer (strings point into env_block).
+ */
+static wchar_t **build_wide_env(wchar_t **env_block_out)
+{
+	wchar_t *env_block, *p;
+	int count, i;
+	wchar_t **wenv;
+
+	env_block = GetEnvironmentStringsW();
+	if (!env_block)
+		bb_error_msg_and_die("GetEnvironmentStringsW failed");
+
+	/* Count entries */
+	count = 0;
+	for (p = env_block; *p; p += wcslen(p) + 1)
+		count++;
+
+	wenv = xmalloc(((size_t)count + 1) * sizeof(wchar_t *));
+	i = 0;
+	for (p = env_block; *p; p += wcslen(p) + 1)
+		wenv[i++] = p;
+	wenv[count] = NULL;
+
+	*env_block_out = env_block;
+	return wenv;
+}
+
+/*
+ * Build a wide environment array from a char** array of "NAME=VALUE" strings.
+ * Returns a NULL-terminated wchar_t** array suitable for _wspawnve.
+ * Caller must free each element and the array itself.
+ */
+static wchar_t **build_wide_env_from_chars(char *const *env)
 {
 	int i, count;
-	size_t total = 0;
-	wchar_t *block, *p;
+	wchar_t **wenv;
 
 	count = string_array_len((char **)env);
-
-	/* First pass: compute total wide chars needed */
-	for (i = 0; i < count; i++)
-		total += strlen(env[i]) + 1;  /* overestimate: UTF-8 never expands */
-	total++;  /* trailing NUL */
-
-	/* Allocate generously (each UTF-8 byte -> at most 1 wchar_t) */
-	block = xmalloc(total * sizeof(wchar_t));
-	p = block;
-
+	wenv = xmalloc(((size_t)count + 1) * sizeof(wchar_t *));
 	for (i = 0; i < count; i++) {
-		int wlen = MultiByteToWideChar(bb_get_codepage(), 0,
-					env[i], -1, p, (int)(block + total - p));
-		if (wlen == 0)
-			bb_error_msg_and_die("env conversion failed: %s", env[i]);
-		p += wlen;  /* wlen includes NUL, p now points past the NUL */
+		wcs_result wr = bb_to_wcs(env[i], NULL, 0);
+		wenv[i] = wr.str;
 	}
-	*p = L'\0';  /* double-NUL terminator */
-
-	return block;
+	wenv[count] = NULL;
+	return wenv;
 }
 
 static intptr_t
@@ -196,7 +232,6 @@ spawnveq(int mode, const char *path, char *const *argv, char *const *env)
 {
 	char **new_argv;
 	char *new_path = NULL;
-	char *command = NULL;
 	int i, argc;
 	intptr_t ret;
 	struct stat st;
@@ -204,11 +239,9 @@ spawnveq(int mode, const char *path, char *const *argv, char *const *env)
 	const char *final_path;
 	wchar_t wpath_buf[PATH_MAX];
 	wcs_result wr_path = {0};
-	wcs_result wr_cmd = {0};
-	wchar_t *env_block = NULL;
-	STARTUPINFOW si;
-	PROCESS_INFORMATION pi;
-	DWORD creation_flags = 0;
+	wchar_t **wargv = NULL;
+	wchar_t **wenv = NULL;
+	wchar_t *env_block = NULL;  /* for FreeEnvironmentStringsW */
 
 	/*
 	 * Require that the file exists, is a regular file and is executable.
@@ -243,7 +276,7 @@ spawnveq(int mode, const char *path, char *const *argv, char *const *env)
 
 	/*
 	 * If a file doesn't have an extension add a '.' at the end.
-	 * This prevents CreateProcess from trying to append an extension.
+	 * This prevents _wspawnve from trying to append an extension.
 	 */
 	if (!strchr(bb_basename(path), '.')) {
 		new_path = xasprintf("%s.", path);
@@ -251,65 +284,43 @@ spawnveq(int mode, const char *path, char *const *argv, char *const *env)
 
 	final_path = new_path ? new_path : path;
 
-	/* Build the command line string from quoted argv */
-	for (i = 0; i < argc; i++) {
-		command = xappendword(command, new_argv[i]);
-	}
-
-	/* Convert path and command line to wide */
+	/* Convert path and argv to wide */
 	wr_path = bb_to_wcs(final_path, wpath_buf, sizeof(wpath_buf));
-	wr_cmd = bb_to_wcs(command, NULL, 0);
+	wargv = build_wide_argv((char *const *)new_argv);
 
-	/* Build environment block */
+	/*
+	 * Build wide environment.  Always pass an explicit env to _wspawnve
+	 * because passing NULL would use the CRT's internal environment,
+	 * which is stale (we use SetEnvironmentVariableW directly).
+	 */
 	if (env) {
-		env_block = build_env_block(env);
-	}
-	/* else: NULL env_block tells CreateProcessW to inherit OS environment */
-
-	ZeroMemory(&si, sizeof(si));
-	si.cb = sizeof(si);
-
-	if (mode == P_DETACH)
-		creation_flags = CREATE_NO_WINDOW;
-
-	creation_flags |= CREATE_UNICODE_ENVIRONMENT;
-
-	if (!CreateProcessW(wr_path.str,
-				wr_cmd.str,
-				NULL,              /* process security attributes */
-				NULL,              /* thread security attributes */
-				TRUE,              /* inherit handles */
-				creation_flags,
-				env_block,
-				NULL,              /* current directory */
-				&si,
-				&pi)) {
-		DWORD last_err = GetLastError();
-		errno = err_win_to_posix();
-		if (last_err == ERROR_INVALID_PARAMETER && len > bb_arg_max())
-			errno = E2BIG;
-		ret = -1;
-		goto done;
-	}
-
-	CloseHandle(pi.hThread);
-
-	if (mode == P_WAIT) {
-		DWORD exit_code;
-		WaitForSingleObject(pi.hProcess, INFINITE);
-		GetExitCodeProcess(pi.hProcess, &exit_code);
-		CloseHandle(pi.hProcess);
-		ret = (intptr_t)exit_code;
+		wenv = build_wide_env_from_chars(env);
 	} else {
-		/* P_NOWAIT / P_DETACH: return the process handle */
-		ret = (intptr_t)pi.hProcess;
+		wenv = build_wide_env(&env_block);
 	}
+
+	errno = 0;
+	ret = _wspawnve(mode, wr_path.str, (const wchar_t *const *)wargv,
+			(const wchar_t *const *)wenv);
+	if (errno == EINVAL && len > bb_arg_max())
+		errno = E2BIG;
 
  done:
 	wcs_free(&wr_path);
-	wcs_free(&wr_cmd);
-	free(env_block);
-	free(command);
+	if (wargv) {
+		for (i = 0; wargv[i]; i++)
+			free(wargv[i]);
+		free(wargv);
+	}
+	if (env_block) {
+		/* wenv points into env_block from GetEnvironmentStringsW */
+		free(wenv);
+		FreeEnvironmentStringsW(env_block);
+	} else if (wenv) {
+		for (i = 0; wenv[i]; i++)
+			free(wenv[i]);
+		free(wenv);
+	}
 	for (i = 0; i < argc; i++)
 		free(new_argv[i]);
 	free(new_argv);

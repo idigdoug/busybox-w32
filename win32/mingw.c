@@ -1237,13 +1237,18 @@ char * FAST_FUNC mingw_getcwd(char *pointer, int len)
 	wchar_t wbuf[PATH_MAX];
 	mbs_result mr;
 	wchar_t *ret = _wgetcwd(wbuf, PATH_MAX);
+	int slen;
 
 	if (!ret)
 		return NULL;
 	mr = bb_to_mbs(ret, NULL, 0);
 	if (!mr.str)
 		return NULL;
-	if ((int)strlen(mr.str) >= len) {
+	slen = strlen(mr.str);
+	if (!pointer) {
+		/* glibc extension: allocate buffer */
+		pointer = xmalloc(slen + 1);
+	} else if (slen >= len) {
 		mbs_free(&mr);
 		errno = ERANGE;
 		return NULL;

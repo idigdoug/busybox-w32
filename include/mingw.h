@@ -226,7 +226,6 @@ int mingw_system(const char *cmd) FAST_FUNC;
 int clearenv(void);
 char *mingw_getenv(const char *name, bool check_fallbacks) FAST_FUNC;
 int mingw_putenv(const char *env) FAST_FUNC;
-wchar_t *mingw_env_block(void);
 char **mingw_environ(void);
 char *mingw_mktemp(char *template) FAST_FUNC;
 int mkstemp(char *template);
