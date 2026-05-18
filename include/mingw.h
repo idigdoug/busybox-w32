@@ -166,9 +166,6 @@ IMPL(setlinebuf, void, ,FILE *fd UNUSED_PARAM)
 BOOL conToCharBuffA(LPSTR d, DWORD len) FAST_FUNC;
 BOOL conToCharA(LPSTR d);
 
-UINT bb_get_codepage(void);
-int windows_codepoint_to_mbs(uint32_t codepoint, char *buf, int buf_bytes) FAST_FUNC;
-
 void set_title(const char *str) FAST_FUNC;
 int get_title(char *buf, int len) FAST_FUNC;
 void move_cursor_row(int n) FAST_FUNC;
@@ -224,19 +221,20 @@ int mingw_system(const char *cmd) FAST_FUNC;
 #define system mingw_system
 
 int clearenv(void);
-char *mingw_getenv(const char *name, bool check_fallbacks) FAST_FUNC;
+char *mingw_getenv(const char *name) FAST_FUNC;
+char *mingw_getenv_no_fallback(const char *name) FAST_FUNC;
 int mingw_putenv(const char *env) FAST_FUNC;
-char **mingw_environ(void);
+char ***mingw_environ(void);
 char *mingw_mktemp(char *template) FAST_FUNC;
 int mkstemp(char *template);
 char *realpath(const char *path, char *resolved_path) FAST_FUNC;
 int setenv(const char *name, const char *value, int replace) FAST_FUNC;
 int unsetenv(const char *env) FAST_FUNC;
 
-#define getenv(name) mingw_getenv(name, true)
+#define getenv mingw_getenv
 #define putenv mingw_putenv
 #undef environ
-#define environ mingw_environ()
+#define environ (*mingw_environ())
 #define mktemp mingw_mktemp
 
 /*
@@ -468,10 +466,8 @@ struct tm *localtime_r(const time_t *timep, struct tm *result) FAST_FUNC;
 char *strptime(const char *s, const char *format, struct tm *tm) FAST_FUNC;
 char *mingw_strptime(const char *s, const char *format, struct tm *tm, long *gmt) FAST_FUNC;
 size_t mingw_strftime(char *buf, size_t max, const char *format, const struct tm *tm) FAST_FUNC;
-void mingw_tzset(void);
 
 #define strftime mingw_strftime
-#define tzset mingw_tzset
 
 /*
  * times.h
@@ -697,11 +693,13 @@ int elevation_state(void);
 void set_interp(int i) FAST_FUNC;
 int mingw_shell_execute(SHELLEXECUTEINFO *info) FAST_FUNC;
 void mingw_die_if_error(NTSTATUS status, const char *function_name) FAST_FUNC;
-HANDLE mingw_CreateFileA(const char *filename, DWORD access, DWORD sharing,
+HANDLE mingw_CreateFile(const char *filename, DWORD access, DWORD sharing,
 		LPSECURITY_ATTRIBUTES sa, DWORD creation, DWORD flags,
 		HANDLE template) FAST_FUNC;
-BOOL mingw_CreateProcessAsUserA(HANDLE token, const char *app, const char *cmd,
+BOOL mingw_SetFileAttributes(const char *path, DWORD attrs) FAST_FUNC;
+BOOL mingw_CreateProcessAsUser(HANDLE token, const char *app, const char *cmd,
 		LPSECURITY_ATTRIBUTES pa, LPSECURITY_ATTRIBUTES ta,
 		BOOL inherit, DWORD flags, LPVOID env, const char *dir,
 		LPSTARTUPINFOA si, LPPROCESS_INFORMATION pi) FAST_FUNC;
-char **mingw_encoding_init(wchar_t **wargv);
+char *mingw_format_message(DWORD flags, const void *source,
+		DWORD message_id, DWORD language_id, va_list *args) FAST_FUNC;

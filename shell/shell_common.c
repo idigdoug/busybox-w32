@@ -290,7 +290,7 @@ shell_builtin_read(struct builtin_read_params *params)
 				if (!(read_flags & BUILTIN_READ_SILENT))
 					console_write(key_bytes, mblen);
 			}
- mingw_have_byte:
+ mingw_have_byte:;
 		} else {
 			/* Don't poll if timeout is -1, it hurts performance.  The
 			 * caution above about interrupts isn't relevant on Windows

@@ -111,7 +111,7 @@ static void env_grow(void)
 	}
 }
 
-char * FAST_FUNC mingw_getenv(const char *name, bool check_fallbacks)
+char * FAST_FUNC mingw_getenv_no_fallback(const char *name)
 {
 	int idx;
 
@@ -126,17 +126,24 @@ char * FAST_FUNC mingw_getenv(const char *name, bool check_fallbacks)
 		return environ_buf[idx] + strlen(name) + 1;
 	}
 
-	if (check_fallbacks) {
-		if (!strcmp(name, "TMPDIR")) {
-			char *r = mingw_getenv("TMP", false);
-			if (!r)
-				r = mingw_getenv("TEMP", false);
-			return r;
-		} else if (!strcmp(name, "HOME")) {
-			struct passwd *p = getpwuid(getuid());
-			if (p)
-				return p->pw_dir;
-		}
+	return NULL;
+}
+
+char * FAST_FUNC mingw_getenv(const char *name)
+{
+	char *r = mingw_getenv_no_fallback(name);
+	if (r)
+		return r;
+
+	if (!strcmp(name, "TMPDIR")) {
+		r = mingw_getenv_no_fallback("TMP");
+		if (!r)
+			r = mingw_getenv_no_fallback("TEMP");
+		return r;
+	} else if (!strcmp(name, "HOME")) {
+		struct passwd *p = getpwuid(getuid());
+		if (p)
+			return p->pw_dir;
 	}
 	return NULL;
 }
@@ -227,8 +234,8 @@ int clearenv(void)
 	return 0;
 }
 
-char **mingw_environ(void)
+char ***mingw_environ(void)
 {
 	env_init();
-	return environ_buf;
+	return &environ_buf;
 }

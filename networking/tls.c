@@ -3230,22 +3230,29 @@ void FAST_FUNC tls_handshake_as_server(tls_state_t *tls,
 #define SEC_STATUS_FAIL(status) ((status) != SEC_E_OK)
 
 static char *hresult_to_error_string(HRESULT result) {
-	char *output = NULL;
-	wchar_t *wmsg = NULL;
-
-	if (FormatMessageW(FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM
+	return mingw_format_message(FORMAT_MESSAGE_FROM_SYSTEM
 				   | FORMAT_MESSAGE_IGNORE_INSERTS |
 				   FORMAT_MESSAGE_MAX_WIDTH_MASK, NULL, result,
 				   MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT),
-				   (wchar_t *) &wmsg, 0, NULL) && wmsg) {
-		int len = WideCharToMultiByte(CP_UTF8, 0, wmsg, -1, NULL, 0, NULL, NULL);
-		if (len > 0) {
-			output = xmalloc(len);
-			WideCharToMultiByte(CP_UTF8, 0, wmsg, -1, output, len, NULL, NULL);
-		}
-		LocalFree(wmsg);
-	}
-	return output;
+				   NULL);
+}
+
+static SECURITY_STATUS mingw_InitializeSecurityContext(
+		PCredHandle cred_handle, PCtxtHandle ctx_handle,
+		const char *target_name, ULONG context_req,
+		ULONG reserved1, ULONG target_data_rep,
+		PSecBufferDesc input, ULONG reserved2,
+		PCtxtHandle new_ctx_handle, PSecBufferDesc output,
+		ULONG *context_attr, PTimeStamp expiry)
+{
+	wchar_t wname_buf[256];
+	wcs_result wr_name = bb_to_wcs(target_name, wname_buf, sizeof(wname_buf));
+	SECURITY_STATUS status = InitializeSecurityContextW(
+			cred_handle, ctx_handle, wr_name.str, context_req,
+			reserved1, target_data_rep, input, reserved2,
+			new_ctx_handle, output, context_attr, expiry);
+	wcs_free(&wr_name);
+	return status;
 }
 
 static void init_sec_buffer(SecBuffer *buffer, void *pvBuffer, unsigned long cbBuffer, unsigned long BufferType) {
@@ -3373,12 +3380,9 @@ static ssize_t tls_read(tls_state_t *state, char *buf, ssize_t len) {
 					init_sec_buffer_desc(
 						&out_buffers_desc, out_buffers, _countof(out_buffers));
 
-				{
-					wchar_t whostname_buf[256];
-					wcs_result wr_host = bb_to_wcs(state->hostname, whostname_buf, sizeof(whostname_buf));
-					status = InitializeSecurityContextW(&state->cred_handle,
+					status = mingw_InitializeSecurityContext(&state->cred_handle,
 														&state->ctx_handle,
-														wr_host.str,
+														state->hostname,
 														flags,
 														0,
 														0,
@@ -3388,8 +3392,6 @@ static ssize_t tls_read(tls_state_t *state, char *buf, ssize_t len) {
 														&out_buffers_desc,
 														&flags,
 														0);
-					wcs_free(&wr_host);
-				}
 
 					if (SEC_STATUS_FAIL(status)) {
 						bb_error_msg_and_die("schannel: renegotiate failed: (0x%08lx): %s",
@@ -3491,23 +3493,18 @@ static void tls_disconnect(tls_state_t * state) {
 	init_sec_buffer_empty(&out_buffer, SECBUFFER_TOKEN);
 	init_sec_buffer_desc(&out_buffer_desc, &out_buffer, 1);
 
-	{
-		wchar_t whostname_buf[256];
-		wcs_result wr_host = bb_to_wcs(state->hostname, whostname_buf, sizeof(whostname_buf));
-		status = InitializeSecurityContextW(&state->cred_handle,
-		                                    &state->ctx_handle,
-		                                    wr_host.str,
-		                                    flags,
-		                                    0,
-		                                    0,
-		                                    NULL,
-		                                    0,
-		                                    &state->ctx_handle,
-		                                    &out_buffer_desc,
-		                                    &flags,
-		                                    0);
-		wcs_free(&wr_host);
-	}
+	status = mingw_InitializeSecurityContext(&state->cred_handle,
+	                                    &state->ctx_handle,
+	                                    state->hostname,
+	                                    flags,
+	                                    0,
+	                                    0,
+	                                    NULL,
+	                                    0,
+	                                    &state->ctx_handle,
+	                                    &out_buffer_desc,
+	                                    &flags,
+	                                    0);
 
 	if ((status == SEC_E_OK) || (status == SEC_I_CONTEXT_EXPIRED)) {
 		write(state->ofd, out_buffer.pvBuffer, out_buffer.cbBuffer);
@@ -3612,24 +3609,19 @@ void FAST_FUNC tls_handshake(tls_state_t *state, const char *hostname) {
 		init_sec_buffer_desc(
 		    &out_buffers_desc, out_buffers, _countof(out_buffers));
 
-		{
-			wchar_t whostname_buf[256];
-			wcs_result wr_host = bb_to_wcs(state->hostname, whostname_buf, sizeof(whostname_buf));
-			status = InitializeSecurityContextW(
-			    &state->cred_handle,
-			    state->initialized ? &state->ctx_handle : NULL,
-			    wr_host.str,
-			    flags,
-			    0,
-			    0,
-			    state->initialized ? &in_buffers_desc : NULL,
-			    0,
-			    &state->ctx_handle,
-			    &out_buffers_desc,
-			    &flags,
-			    0);
-			wcs_free(&wr_host);
-		}
+		status = mingw_InitializeSecurityContext(
+		    &state->cred_handle,
+		    state->initialized ? &state->ctx_handle : NULL,
+		    state->hostname,
+		    flags,
+		    0,
+		    0,
+		    state->initialized ? &in_buffers_desc : NULL,
+		    0,
+		    &state->ctx_handle,
+		    &out_buffers_desc,
+		    &flags,
+		    0);
 
 		state->initialized = true;
 

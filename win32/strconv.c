@@ -7,13 +7,13 @@
 #include "strconv.h"
 #include <assert.h>
 
-static UINT bb_codepage = CP_UTF8;
+static unsigned bb_codepage = CP_UTF8;
 static enum bb_codepage_type bb_cp_type = BB_CP_UTF8;
-static UINT bb_cp_max_charsize = 4; /* MaxCharSize for current codepage */
+static unsigned bb_cp_max_charsize = 4; /* MaxCharSize for current codepage */
 /* Lead byte table for DBCS: 256-bit bitmap, indexed by byte value */
 static unsigned char bb_lead_byte_map[32];
 
-void bb_set_codepage(UINT cp)
+void bb_set_codepage(unsigned cp)
 {
 	CPINFO info;
 
@@ -50,7 +50,7 @@ void bb_set_codepage(UINT cp)
 	}
 }
 
-UINT bb_get_codepage(void)
+unsigned bb_get_codepage(void)
 {
 	return bb_codepage;
 }
@@ -60,15 +60,15 @@ enum bb_codepage_type bb_get_codepage_type(void)
 	return bb_cp_type;
 }
 
-UINT bb_get_codepage_max_charsize(void)
+unsigned bb_get_codepage_max_charsize(void)
 {
 	return bb_cp_max_charsize;
 }
 
-BOOL bb_is_lead_byte(unsigned char c)
+/* bb_lead_byte_map is zeroed for non-DBCS codepages, so this is safe to
+ * call unconditionally regardless of codepage type. */
+bool bb_is_lead_byte(unsigned char c)
 {
-	if (bb_cp_type != BB_CP_DBCS)
-		return FALSE;
 	return (bb_lead_byte_map[c >> 3] & (1 << (c & 7))) != 0;
 }
 
@@ -307,7 +307,7 @@ char **mingw_encoding_init(wchar_t **wargv)
 
 	/* Check for a codepage override before converting argv */
 	if (GetEnvironmentVariableW(L"BB_CODEPAGE", cpbuf, ARRAY_SIZE(cpbuf))) {
-		UINT cp = (UINT)wcstoul(cpbuf, NULL, 10);
+		unsigned cp = (unsigned)wcstoul(cpbuf, NULL, 10);
 		if (cp > 0)
 			bb_set_codepage(cp);
 	}

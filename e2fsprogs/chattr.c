@@ -76,9 +76,6 @@
 
 #include "libbb.h"
 #include "e2fs_lib.h"
-#if ENABLE_PLATFORM_MINGW32
-#include "strconv.h"
-#endif
 
 #define OPT_ADD      (1 << 0)
 #define OPT_REM      (1 << 1)
@@ -267,14 +264,9 @@ static void change_attributes(const char *name, struct globals *gp)
 		st.st_attr &= ~gp->rf;
 	/*if (gp->flags & OPT_ADD) - not needed, af is zero otherwise */
 		st.st_attr |= gp->af;
-	{
-		wchar_t wname_buf[PATH_MAX];
-		wcs_result wr = bb_to_wcs(name, wname_buf, sizeof(wname_buf));
-		if (!SetFileAttributesW(wr.str, st.st_attr & CHATTR_MASK)) {
-			errno = err_win_to_posix();
-			bb_perror_msg("setting flags on %s", name);
-		}
-		wcs_free(&wr);
+	if (!mingw_SetFileAttributes(name, st.st_attr & CHATTR_MASK)) {
+		errno = err_win_to_posix();
+		bb_perror_msg("setting flags on %s", name);
 	}
 #endif
 

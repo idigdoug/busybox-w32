@@ -12,8 +12,7 @@ const char *applet_name;
 #include "usage.h"
 
 #if ENABLE_PLATFORM_MINGW32
-#include <wchar.h>
-char **mingw_encoding_init(wchar_t **wargv);
+#include "strconv.h"
 
 int wmain(int argc, wchar_t **wargv)
 {

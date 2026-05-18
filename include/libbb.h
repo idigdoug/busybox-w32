@@ -2217,6 +2217,7 @@ enum {
 int64_t read_key(int fd, char *buffer, int timeout) FAST_FUNC;
 #if ENABLE_PLATFORM_MINGW32
 int64_t windows_read_key(int fd, char *buffer, int timeout) FAST_FUNC;
+int windows_codepoint_to_mbs(uint32_t codepoint, char *buf, int buf_bytes) FAST_FUNC;
 #endif
 /* This version loops on EINTR: */
 int64_t safe_read_key(int fd, char *buffer, int timeout) FAST_FUNC;

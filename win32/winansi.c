@@ -730,7 +730,7 @@ static char *process_escape(char *pos)
 BOOL FAST_FUNC conToCharBuffA(LPSTR s, DWORD len)
 {
 	UINT cp = bb_get_codepage(), conicp = GetConsoleCP();
-	UINT cp_maxchar = bb_get_codepage_max_charsize();
+	unsigned cp_maxchar = bb_get_codepage_max_charsize();
 	CPINFO con_info;
 	WCHAR *buf;
 

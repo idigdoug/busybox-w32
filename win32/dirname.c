@@ -3,12 +3,8 @@
  * This file is part of the mingw-w64 runtime package.
  * No warranty is given; refer to the file DISCLAIMER.PD within this package.
  */
-#ifndef WIN32_LEAN_AND_MEAN
-#define WIN32_LEAN_AND_MEAN
-#endif
 #include <stdlib.h>
 #include <libgen.h>
-#include <windows.h>
 #include "strconv.h"
 
 #if defined(__MINGW64_VERSION_MAJOR) && __MINGW64_VERSION_MAJOR > 11
@@ -90,11 +86,7 @@ do_get_path_info(struct path_info* info, char* path)
   {
     char* pos = path;
     int unc_ncoms = 0;
-    DWORD cp;
     int dbcs_tb, prev_dir_sep, dir_sep;
-
-    /* Use our configured codepage, not the system ACP.  */
-    cp = bb_get_codepage();
 
     /* Set the structure to 'no data'.  */
     info->prefix_end = NULL;
@@ -115,7 +107,7 @@ do_get_path_info(struct path_info* info, char* path)
 
         if(dbcs_tb)
           dbcs_tb = 0;
-        else if(IsDBCSLeadByteEx(cp, *pos))
+        else if(bb_is_lead_byte(*pos))
           dbcs_tb = 1;
         else
           dir_sep = IS_DIR_SEP(*pos);
@@ -159,7 +151,7 @@ do_get_path_info(struct path_info* info, char* path)
 
       if(dbcs_tb)
         dbcs_tb = 0;
-      else if(IsDBCSLeadByteEx(cp, *pos))
+      else if(bb_is_lead_byte(*pos))
         dbcs_tb = 1;
       else
         dir_sep = IS_DIR_SEP(*pos);

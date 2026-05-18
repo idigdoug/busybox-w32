@@ -3,6 +3,7 @@
 #define WIN32_STRCONV_H
 
 #include <stdbool.h>
+#include <wchar.h>
 
 /*
  * String conversion between multibyte (char) and wide character (wchar_t)
@@ -34,13 +35,19 @@ typedef struct {
  * Changes the Windows code page used by bb_to_wcs and bb_to_mbs.
  * Default is CP_UTF8.
  */
-void bb_set_codepage(UINT cp);
+void bb_set_codepage(unsigned cp);
+
+/*
+ * Initialize the encoding subsystem: parse BB_CODEPAGE from the environment,
+ * convert wargv to multibyte argv.  Called once at startup from wmain.
+ */
+char **mingw_encoding_init(wchar_t **wargv);
 
 /*
  * Retrieves the Windows code page used by bb_to_wcs and bb_to_mbs.
  * Default is CP_UTF8.
  */
-UINT bb_get_codepage(void);
+unsigned bb_get_codepage(void);
 
 /*
  * Codepage encoding type classification.
@@ -60,13 +67,13 @@ enum bb_codepage_type bb_get_codepage_type(void);
 /*
  * Returns MaxCharSize for the current codepage (cached from GetCPInfo).
  */
-UINT bb_get_codepage_max_charsize(void);
+unsigned bb_get_codepage_max_charsize(void);
 
 /*
  * For DBCS codepages, returns TRUE if 'c' is a lead byte.
  * Returns FALSE for non-DBCS codepages or non-lead bytes.
  */
-BOOL bb_is_lead_byte(unsigned char c);
+bool bb_is_lead_byte(unsigned char c);
 
 /*
  * Convert a NUL-terminated multibyte string to wide characters.

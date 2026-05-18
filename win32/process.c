@@ -178,41 +178,11 @@ static wchar_t **build_wide_argv(char *const *argv)
 }
 
 /*
- * Build a wide environment array from the OS process environment.
- * Returns a NULL-terminated wchar_t** array suitable for _wspawnve.
- * Caller must free the returned pointer (strings point into env_block).
- */
-static wchar_t **build_wide_env(wchar_t **env_block_out)
-{
-	wchar_t *env_block, *p;
-	int count, i;
-	wchar_t **wenv;
-
-	env_block = GetEnvironmentStringsW();
-	if (!env_block)
-		bb_error_msg_and_die("GetEnvironmentStringsW failed");
-
-	/* Count entries */
-	count = 0;
-	for (p = env_block; *p; p += wcslen(p) + 1)
-		count++;
-
-	wenv = xmalloc(((size_t)count + 1) * sizeof(wchar_t *));
-	i = 0;
-	for (p = env_block; *p; p += wcslen(p) + 1)
-		wenv[i++] = p;
-	wenv[count] = NULL;
-
-	*env_block_out = env_block;
-	return wenv;
-}
-
-/*
  * Build a wide environment array from a char** array of "NAME=VALUE" strings.
  * Returns a NULL-terminated wchar_t** array suitable for _wspawnve.
  * Caller must free each element and the array itself.
  */
-static wchar_t **build_wide_env_from_chars(char *const *env)
+static wchar_t **build_wide_env(char *const *env)
 {
 	int i, count;
 	wchar_t **wenv;
@@ -241,7 +211,6 @@ spawnveq(int mode, const char *path, char *const *argv, char *const *env)
 	wcs_result wr_path = {0};
 	wchar_t **wargv = NULL;
 	wchar_t **wenv = NULL;
-	wchar_t *env_block = NULL;  /* for FreeEnvironmentStringsW */
 
 	/*
 	 * Require that the file exists, is a regular file and is executable.
@@ -291,13 +260,9 @@ spawnveq(int mode, const char *path, char *const *argv, char *const *env)
 	/*
 	 * Build wide environment.  Always pass an explicit env to _wspawnve
 	 * because passing NULL would use the CRT's internal environment,
-	 * which is stale (we use SetEnvironmentVariableW directly).
+	 * which may be stale.
 	 */
-	if (env) {
-		wenv = build_wide_env_from_chars(env);
-	} else {
-		wenv = build_wide_env(&env_block);
-	}
+	wenv = build_wide_env(env ? env : (char *const *)environ);
 
 	errno = 0;
 	ret = _wspawnve(mode, wr_path.str, (const wchar_t *const *)wargv,
@@ -312,11 +277,7 @@ spawnveq(int mode, const char *path, char *const *argv, char *const *env)
 			free(wargv[i]);
 		free(wargv);
 	}
-	if (env_block) {
-		/* wenv points into env_block from GetEnvironmentStringsW */
-		free(wenv);
-		FreeEnvironmentStringsW(env_block);
-	} else if (wenv) {
+	if (wenv) {
 		for (i = 0; wenv[i]; i++)
 			free(wenv[i]);
 		free(wenv);
@@ -555,7 +516,7 @@ static int exit_code_to_wait_status_cmd(DWORD exit_code, const char *cmd)
 {
 	int sig, status;
 	DECLARE_PROC_ADDR(ULONG, RtlNtStatusToDosError, NTSTATUS);
-	DWORD flags, code;
+	DWORD code;
 	char *msg = NULL;
 	const char *sep = ": ";
 
@@ -574,24 +535,15 @@ static int exit_code_to_wait_status_cmd(DWORD exit_code, const char *cmd)
 	// The exit code may be an NTSTATUS code.  Try to obtain a
 	// descriptive message for it.
 	if (exit_code > 0xff) {
-		flags = FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM;
 		if (INIT_PROC_ADDR(ntdll.dll, RtlNtStatusToDosError)) {
 			code = RtlNtStatusToDosError(exit_code);
-			{
-				wchar_t *wmsg = NULL;
-				if (FormatMessageW(flags, NULL, code, 0, (wchar_t *)&wmsg, 0, NULL) && wmsg) {
-					char mbuf[256];
-					mbs_result mr = bb_to_mbs(wmsg, mbuf, sizeof(mbuf));
-					msg = xstrdup(mr.str);
-					mbs_free(&mr);
-					LocalFree(wmsg);
-					{
-						char *cr = strrchr(msg, '\r');
-						if (cr) {		// Replace CRLF with a space
-							cr[0] = ' ';
-							cr[1] = '\0';
-						}
-					}
+			msg = mingw_format_message(
+					FORMAT_MESSAGE_FROM_SYSTEM, NULL, code, 0, NULL);
+			if (msg) {
+				char *cr = strrchr(msg, '\r');
+				if (cr) {		// Replace CRLF with a space
+					cr[0] = ' ';
+					cr[1] = '\0';
 				}
 			}
 		}

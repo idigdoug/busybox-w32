@@ -2202,27 +2202,6 @@ int FAST_FUNC sysinfo(struct sysinfo *info)
 	return 0;
 }
 
-/*
- * Sync TZ from our environment into the CRT, then call _tzset().
- * Needed because our setenv/putenv update the OS environment block
- * but not the CRT's internal copy that _tzset reads from.
- */
-void mingw_tzset(void)
-{
-	const char *tz = mingw_getenv("TZ", false);
-	if (tz) {
-		char *envstr = xasprintf("TZ=%s", tz);
-		wchar_t wbuf[128];
-		wcs_result wr = bb_to_wcs(envstr, wbuf, sizeof(wbuf));
-		_wputenv(wr.str);
-		wcs_free(&wr);
-		free(envstr);
-	} else {
-		_wputenv(L"TZ=");
-	}
-	_tzset();
-}
-
 #undef strftime
 size_t FAST_FUNC
 mingw_strftime(char *buf, size_t max, const char *format, const struct tm *tm)
@@ -2264,7 +2243,7 @@ mingw_strftime(char *buf, size_t max, const char *format, const struct tm *tm)
 				replace = "%H:%M:%S";
 			}
 			else if ( t[1] == 'z' ) {
-				mingw_tzset();
+				_tzset();
 				if ( tm->tm_isdst >= 0 ) {
 					int offset = (int)_timezone - (tm->tm_isdst > 0 ? 3600 : 0);
 					int hr, min;
@@ -2914,7 +2893,7 @@ char * FAST_FUNC exe_relative_path(const char *tail)
 	return relpath;
 }
 
-HANDLE FAST_FUNC mingw_CreateFileA(const char *filename, DWORD access,
+HANDLE FAST_FUNC mingw_CreateFile(const char *filename, DWORD access,
 		DWORD sharing, LPSECURITY_ATTRIBUTES sa, DWORD creation,
 		DWORD flags, HANDLE template)
 {
@@ -2926,7 +2905,36 @@ HANDLE FAST_FUNC mingw_CreateFileA(const char *filename, DWORD access,
 	return h;
 }
 
-BOOL FAST_FUNC mingw_CreateProcessAsUserA(HANDLE token, const char *app,
+BOOL FAST_FUNC mingw_SetFileAttributes(const char *path, DWORD attrs)
+{
+	wchar_t wbuf[PATH_MAX];
+	wcs_result wr = bb_to_wcs(path, wbuf, sizeof(wbuf));
+	BOOL ret = SetFileAttributesW(wr.str, attrs);
+	wcs_free(&wr);
+	return ret;
+}
+
+/*
+ * FormatMessageW wrapper that returns a malloc'd multibyte string.
+ * Returns NULL on failure.  Caller must free() the result.
+ */
+char * FAST_FUNC mingw_format_message(DWORD flags, const void *source,
+		DWORD message_id, DWORD language_id, va_list *args)
+{
+	wchar_t *wmsg = NULL;
+	char *result = NULL;
+
+	flags |= FORMAT_MESSAGE_ALLOCATE_BUFFER;
+	if (FormatMessageW(flags, source, message_id, language_id,
+			(wchar_t *)&wmsg, 0, args) && wmsg) {
+		mbs_result mr = bb_to_mbs(wmsg, NULL, 0);
+		result = mr.str;
+		LocalFree(wmsg);
+	}
+	return result;
+}
+
+BOOL FAST_FUNC mingw_CreateProcessAsUser(HANDLE token, const char *app,
 		const char *cmd, LPSECURITY_ATTRIBUTES pa,
 		LPSECURITY_ATTRIBUTES ta, BOOL inherit, DWORD flags,
 		LPVOID env, const char *dir, LPSTARTUPINFOA si,
