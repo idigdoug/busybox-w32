@@ -5,7 +5,7 @@
  */
 #include <stdlib.h>
 #include <libgen.h>
-#include "strconv.h"
+#include "mingw_encoding.h"
 
 #if defined(__MINGW64_VERSION_MAJOR) && __MINGW64_VERSION_MAJOR > 11
 
@@ -107,7 +107,7 @@ do_get_path_info(struct path_info* info, char* path)
 
         if(dbcs_tb)
           dbcs_tb = 0;
-        else if(bb_is_lead_byte(*pos))
+        else if(mingw_is_lead_byte(*pos))
           dbcs_tb = 1;
         else
           dir_sep = IS_DIR_SEP(*pos);
@@ -151,7 +151,7 @@ do_get_path_info(struct path_info* info, char* path)
 
       if(dbcs_tb)
         dbcs_tb = 0;
-      else if(bb_is_lead_byte(*pos))
+      else if(mingw_is_lead_byte(*pos))
         dbcs_tb = 1;
       else
         dir_sep = IS_DIR_SEP(*pos);

@@ -5,7 +5,7 @@
 #include "libbb.h"
 #include <windows.h>
 #include "lazyload.h"
-#include "strconv.h"
+#include "mingw_encoding.h"
 #undef PACKED
 
 
@@ -171,9 +171,9 @@ int FAST_FUNC terminal_mode(int reset)
 void FAST_FUNC set_title(const char *str)
 {
 	wchar_t wbuf[260];
-	wcs_result wr = bb_to_wcs(str, wbuf, sizeof(wbuf));
+	mingw_wcs_result_t wr = mingw_to_wcs(str, wbuf, sizeof(wbuf));
 	SetConsoleTitleW(wr.str);
-	wcs_free(&wr);
+	mingw_wcs_free(&wr);
 }
 
 int FAST_FUNC get_title(char *buf, int len)
@@ -181,11 +181,11 @@ int FAST_FUNC get_title(char *buf, int len)
 	wchar_t wbuf[260];
 	DWORD ret = GetConsoleTitleW(wbuf, 260);
 	if (ret > 0) {
-		mbs_result mr = bb_to_mbs(wbuf, buf, len);
+		mingw_mbs_result_t mr = mingw_to_mbs(wbuf, buf, len);
 		if (mr.str != buf && mr.str != NULL) {
 			strncpy(buf, mr.str, len);
 			buf[len - 1] = '\0';
-			mbs_free(&mr);
+			mingw_mbs_free(&mr);
 		}
 		return (int)strlen(buf);
 	}
@@ -556,9 +556,9 @@ static char *process_escape(char *pos)
 			*bel++ = '\0';
 			{
 			wchar_t wtitle_buf[260];
-			wcs_result wr_title = bb_to_wcs(pos+4, wtitle_buf, sizeof(wtitle_buf));
+			mingw_wcs_result_t wr_title = mingw_to_wcs(pos+4, wtitle_buf, sizeof(wtitle_buf));
 			SetConsoleTitleW(wr_title.str);
-			wcs_free(&wr_title);
+			mingw_wcs_free(&wr_title);
 		}
 			return bel;
 		}
@@ -729,8 +729,8 @@ static char *process_escape(char *pos)
 
 BOOL FAST_FUNC conToCharBuffA(LPSTR s, DWORD len)
 {
-	UINT cp = bb_get_codepage(), conicp = GetConsoleCP();
-	unsigned cp_maxchar = bb_get_codepage_max_charsize();
+	UINT cp = mingw_get_codepage(), conicp = GetConsoleCP();
+	unsigned cp_maxchar = mingw_get_codepage_max_charsize();
 	CPINFO con_info;
 	WCHAR *buf;
 
@@ -1183,11 +1183,11 @@ int FAST_FUNC mingw_isatty(int fd)
 
 /*
  * Write multibyte string to console using WriteConsoleW.  Decodes the
- * internal encoding (bb_get_codepage()) to codepoints, converts to UTF-16,
+ * internal encoding (mingw_get_codepage()) to codepoints, converts to UTF-16,
  * and writes.  Handles arbitrary split boundaries across calls by keeping
  * state for incomplete multi-byte sequences.
  *
- * Supports SBCS, DBCS, and UTF-8 codepages.  For BB_CP_OTHER, falls back
+ * Supports SBCS, DBCS, and UTF-8 codepages.  For MINGW_CODEPAGE_OTHER, falls back
  * to MultiByteToWideChar on the whole buffer (no cross-call state).
  *
  * Returns 0 on success, -1 on error.
@@ -1209,15 +1209,15 @@ static int writeCon_wide(int fd, const char *buf, size_t siz)
 	HANDLE h = (HANDLE)_get_osfhandle(fd);
 	DWORD nwritten;
 	int wlen = 0;
-	enum bb_codepage_type cp_type = bb_get_codepage_type();
+	mingw_codepage_category cp_type = mingw_get_codepage_category();
 
 	if (!wbuf)
 		wbuf = xmalloc(wbuf_size * sizeof(wchar_t));
 
-	if (cp_type == BB_CP_OTHER) {
+	if (cp_type == MINGW_CODEPAGE_OTHER) {
 		/* Fallback: convert entire buffer at once, no cross-call state.
 		 * May produce substitution chars at split boundaries. */
-		int n = MultiByteToWideChar(bb_get_codepage(), 0, buf, siz, wbuf, wbuf_size);
+		int n = MultiByteToWideChar(mingw_get_codepage(), 0, buf, siz, wbuf, wbuf_size);
 		if (n > 0) {
 			if (!WriteConsoleW(h, wbuf, n, &nwritten, 0))
 				return -1;
@@ -1231,22 +1231,22 @@ static int writeCon_wide(int fd, const char *buf, size_t siz)
 		int complete = 0;
 
 		switch (cp_type) {
-		case BB_CP_SBCS:
+		case MINGW_CODEPAGE_SBCS:
 			/* Every byte is a complete character */
 			codepoint = c;
 			complete = 1;
 			break;
 
-		case BB_CP_DBCS:
+		case MINGW_CODEPAGE_DBCS:
 			if (pending_len == 0) {
-				if (bb_is_lead_byte(c)) {
+				if (mingw_is_lead_byte(c)) {
 					pending_bytes[0] = c;
 					pending_len = 1;
 				} else {
 					/* Single-byte character: convert via API */
 					wchar_t wc;
 					char cb = (char)c;
-					if (MultiByteToWideChar(bb_get_codepage(), 0,
+					if (MultiByteToWideChar(mingw_get_codepage(), 0,
 							&cb, 1, &wc, 1) == 1) {
 						codepoint = wc;
 					} else {
@@ -1258,7 +1258,7 @@ static int writeCon_wide(int fd, const char *buf, size_t siz)
 				/* Trail byte: convert the 2-byte sequence */
 				wchar_t wc;
 				pending_bytes[1] = c;
-				if (MultiByteToWideChar(bb_get_codepage(), 0,
+				if (MultiByteToWideChar(mingw_get_codepage(), 0,
 						(char *)pending_bytes, 2, &wc, 1) == 1) {
 					codepoint = wc;
 				} else {
@@ -1269,7 +1269,7 @@ static int writeCon_wide(int fd, const char *buf, size_t siz)
 			}
 			break;
 
-		case BB_CP_UTF8: {
+		case MINGW_CODEPAGE_UTF8: {
 			int topbits = 0;
 			while (c & (0x80 >> topbits))
 				++topbits;

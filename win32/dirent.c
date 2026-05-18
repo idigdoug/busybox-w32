@@ -1,5 +1,5 @@
 #include "libbb.h"
-#include "strconv.h"
+#include "mingw_encoding.h"
 
 struct DIR {
 	struct dirent dd_dir;
@@ -12,11 +12,11 @@ struct DIR {
 static inline void finddata2dirent(struct dirent *ent, WIN32_FIND_DATAW *fdata)
 {
 	/* convert wide file name to multibyte and copy to dirent */
-	mbs_result mr = bb_to_mbs(fdata->cFileName, ent->d_name, sizeof(ent->d_name));
+	mingw_mbs_result_t mr = mingw_to_mbs(fdata->cFileName, ent->d_name, sizeof(ent->d_name));
 	if (mr.str != ent->d_name) {
 		strncpy(ent->d_name, mr.str, sizeof(ent->d_name) - 1);
 		ent->d_name[sizeof(ent->d_name) - 1] = '\0';
-		mbs_free(&mr);
+		mingw_mbs_free(&mr);
 	}
 
 	if ((fdata->dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) &&
@@ -37,7 +37,7 @@ DIR * FAST_FUNC opendir(const char *name)
 	HANDLE h;
 	int len;
 	DIR *dir;
-	wcs_result wr;
+	mingw_wcs_result_t wr;
 
 	/* check that name is not NULL */
 	if (!name) {
@@ -59,12 +59,12 @@ DIR * FAST_FUNC opendir(const char *name)
 			pattern[len++] = '/';
 		pattern[len++] = '*';
 		pattern[len] = 0;
-		wr = bb_to_wcs(pattern, wpattern, sizeof(wpattern));
+		wr = mingw_to_wcs(pattern, wpattern, sizeof(wpattern));
 	}
 
 	/* open find handle */
 	h = FindFirstFileW(wr.str, &fdata);
-	wcs_free(&wr);
+	mingw_wcs_free(&wr);
 	if (h == INVALID_HANDLE_VALUE) {
 		DWORD err = GetLastError();
 		errno = (err == ERROR_DIRECTORY) ? ENOTDIR : err_win_to_posix();

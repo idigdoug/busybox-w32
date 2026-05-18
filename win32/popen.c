@@ -1,6 +1,6 @@
 #include <fcntl.h>
 #include "libbb.h"
-#include "strconv.h"
+#include "mingw_encoding.h"
 #include "NUM_APPLETS.h"
 
 typedef struct {
@@ -38,7 +38,7 @@ static int mingw_pipe(pipe_data *p, int bidi)
 
 		name = xasprintf("\\\\.\\pipe\\bb_pipe.%d.%d", getpid(), ++count);
 		{
-			wcs_result wr = bb_to_wcs(name, NULL, 0);
+			mingw_wcs_result_t wr = mingw_to_wcs(name, NULL, 0);
 			wname = wr.str;
 		}
 
@@ -235,7 +235,7 @@ static int mingw_popen_internal(pipe_data *p, const char *exe,
 	{
 	STARTUPINFOW siStartInfo;
 	wchar_t wexe_buf[PATH_MAX];
-	wcs_result wr_exe, wr_cmd;
+	mingw_wcs_result_t wr_exe, wr_cmd;
 
 	ZeroMemory(&siStartInfo, sizeof(STARTUPINFOW));
 	siStartInfo.cb = sizeof(STARTUPINFOW);
@@ -259,8 +259,8 @@ static int mingw_popen_internal(pipe_data *p, const char *exe,
 	siStartInfo.wShowWindow = SW_HIDE;
 	siStartInfo.dwFlags = STARTF_USESTDHANDLES|STARTF_USESHOWWINDOW;
 
-	wr_exe = bb_to_wcs(exe, wexe_buf, sizeof(wexe_buf));
-	wr_cmd = bb_to_wcs(cmd, NULL, 0);
+	wr_exe = mingw_to_wcs(exe, wexe_buf, sizeof(wexe_buf));
+	wr_cmd = mingw_to_wcs(cmd, NULL, 0);
 
 	success = CreateProcessW(wr_exe.str,
 				wr_cmd.str,        /* command line */
@@ -273,8 +273,8 @@ static int mingw_popen_internal(pipe_data *p, const char *exe,
 				&siStartInfo,      /* STARTUPINFO pointer */
 				&p->piProcInfo);   /* receives PROCESS_INFORMATION */
 
-	wcs_free(&wr_exe);
-	wcs_free(&wr_cmd);
+	mingw_wcs_free(&wr_exe);
+	mingw_wcs_free(&wr_cmd);
 	}
 
 	if ( !success ) {

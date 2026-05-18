@@ -4,7 +4,7 @@
  */
 #define MNTENT_PRIVATE
 #include "libbb.h"
-#include "strconv.h"
+#include "mingw_encoding.h"
 
 struct mntstate {
 	DWORD drives;
@@ -48,11 +48,11 @@ int FAST_FUNC fill_mntdata(struct mntdata *data, int index)
 			return FALSE;
 		}
 		{
-			mbs_result mr = bb_to_mbs(wtype, data->mnt_type, 100);
+			mingw_mbs_result_t mr = mingw_to_mbs(wtype, data->mnt_type, 100);
 			if (mr.str != data->mnt_type) {
 				strncpy(data->mnt_type, mr.str, 100);
 				data->mnt_type[99] = '\0';
-				mbs_free(&mr);
+				mingw_mbs_free(&mr);
 			}
 		}
 

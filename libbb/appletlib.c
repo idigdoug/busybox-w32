@@ -32,7 +32,7 @@ static inline int *get_perrno(void) { return &errno; }
 
 #include "busybox.h"
 #if ENABLE_PLATFORM_MINGW32
-#include "strconv.h"
+#include "mingw_encoding.h"
 #endif
 
 #if !(defined(__FreeBSD__) || defined(__OpenBSD__) || defined(__NetBSD__) \

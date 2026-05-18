@@ -1,5 +1,5 @@
 #include "libbb.h"
-#include "strconv.h"
+#include "mingw_encoding.h"
 
 /*
  * Environment subsystem.  We maintain a single char** array (environ_buf)
@@ -45,7 +45,7 @@ static void env_sync_to_os(const char *name, const char *value)
 {
 	char *envstr = xasprintf("%s=%s", name, value ? value : "");
 	wchar_t wbuf[512];
-	wcs_result wr = bb_to_wcs(envstr, wbuf, sizeof(wbuf));
+	mingw_wcs_result_t wr = mingw_to_wcs(envstr, wbuf, sizeof(wbuf));
 	wchar_t *weq;
 
 	/* Push "NAME=VALUE" to CRT */
@@ -56,7 +56,7 @@ static void env_sync_to_os(const char *name, const char *value)
 	*weq = L'\0';
 	SetEnvironmentVariableW(wr.str, value ? weq + 1 : NULL);
 
-	wcs_free(&wr);
+	mingw_wcs_free(&wr);
 	free(envstr);
 }
 
@@ -91,7 +91,7 @@ static void env_init(void)
 	i = 0;
 	for (p = env_block; *p; p += wcslen(p) + 1) {
 		char buf[PATH_MAX];
-		mbs_result r = bb_to_mbs(p, buf, sizeof(buf));
+		mingw_mbs_result_t r = mingw_to_mbs(p, buf, sizeof(buf));
 		environ_buf[i++] = r.need_to_free ? r.str : xstrdup(r.str);
 	}
 	environ_buf[count] = NULL;

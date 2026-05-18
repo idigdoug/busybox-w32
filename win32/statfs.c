@@ -1,6 +1,6 @@
 #include <sys/statfs.h>
 #include "libbb.h"
-#include "strconv.h"
+#include "mingw_encoding.h"
 
 /*
  * Code from libguestfs (with addition of GetVolumeInformation call)
@@ -14,7 +14,7 @@ int statfs(const char *file, struct statfs *buf)
 	char fsname[100];
 	struct mntent *mnt;
 	wchar_t wfile_buf[PATH_MAX];
-	wcs_result wr_file;
+	mingw_wcs_result_t wr_file;
 	wchar_t wfsname[100];
 	/* Valid filesystem names don't seem to be documented.  The following
 	 * are present in Wine (dlls/kernel32/volume.c). */
@@ -26,31 +26,31 @@ int statfs(const char *file, struct statfs *buf)
 	}
 
 	file = mnt->mnt_dir;
-	wr_file = bb_to_wcs(file, wfile_buf, sizeof(wfile_buf));
+	wr_file = mingw_to_wcs(file, wfile_buf, sizeof(wfile_buf));
 
 	if ( !GetDiskFreeSpaceExW(wr_file.str, (PULARGE_INTEGER) &free_bytes_available,
 			(PULARGE_INTEGER) &total_number_of_bytes,
 			(PULARGE_INTEGER) &total_number_of_free_bytes) ) {
-		wcs_free(&wr_file);
+		mingw_wcs_free(&wr_file);
 		errno = err_win_to_posix();
 		return -1;
 	}
 
 	if ( !GetVolumeInformationW(wr_file.str, NULL, 0, &serial, &namelen, &flags,
 								wfsname, 100) ) {
-		wcs_free(&wr_file);
+		mingw_wcs_free(&wr_file);
 		errno = err_win_to_posix();
 		return -1;
 	}
 
-	wcs_free(&wr_file);
+	mingw_wcs_free(&wr_file);
 
 	{
-		mbs_result mr = bb_to_mbs(wfsname, fsname, sizeof(fsname));
+		mingw_mbs_result_t mr = mingw_to_mbs(wfsname, fsname, sizeof(fsname));
 		if (mr.str != fsname) {
 			strncpy(fsname, mr.str, sizeof(fsname));
 			fsname[sizeof(fsname) - 1] = '\0';
-			mbs_free(&mr);
+			mingw_mbs_free(&mr);
 		}
 	}
 

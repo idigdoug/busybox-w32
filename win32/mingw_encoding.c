@@ -4,16 +4,17 @@
  * strings, using a configurable code page.
  */
 #include "libbb.h"
-#include "strconv.h"
+#include "mingw_encoding.h"
 #include <assert.h>
 
 static unsigned bb_codepage = CP_UTF8;
-static enum bb_codepage_type bb_cp_type = BB_CP_UTF8;
+static mingw_codepage_category mingw_cp_type = MINGW_CODEPAGE_UTF8;
 static unsigned bb_cp_max_charsize = 4; /* MaxCharSize for current codepage */
+
 /* Lead byte table for DBCS: 256-bit bitmap, indexed by byte value */
 static unsigned char bb_lead_byte_map[32];
 
-void bb_set_codepage(unsigned cp)
+static void set_codepage(unsigned cp)
 {
 	CPINFO info;
 
@@ -21,7 +22,7 @@ void bb_set_codepage(unsigned cp)
 
 	if (cp == CP_UTF8) {
 		bb_codepage = cp;
-		bb_cp_type = BB_CP_UTF8;
+		mingw_cp_type = MINGW_CODEPAGE_UTF8;
 		bb_cp_max_charsize = 4;
 		return;
 	}
@@ -36,9 +37,9 @@ void bb_set_codepage(unsigned cp)
 	bb_cp_max_charsize = info.MaxCharSize;
 
 	if (info.MaxCharSize == 1) {
-		bb_cp_type = BB_CP_SBCS;
+		mingw_cp_type = MINGW_CODEPAGE_SBCS;
 	} else if (info.MaxCharSize == 2) {
-		bb_cp_type = BB_CP_DBCS;
+		mingw_cp_type = MINGW_CODEPAGE_DBCS;
 		/* Build lead byte bitmap from the LeadByte ranges.
 		 * LeadByte is an array of pairs [low, high], terminated by [0,0]. */
 		for (int i = 0; i < MAX_LEADBYTES && info.LeadByte[i]; i += 2) {
@@ -46,28 +47,28 @@ void bb_set_codepage(unsigned cp)
 				bb_lead_byte_map[c >> 3] |= (1 << (c & 7));
 		}
 	} else {
-		bb_cp_type = BB_CP_OTHER;
+		mingw_cp_type = MINGW_CODEPAGE_OTHER;
 	}
 }
 
-unsigned bb_get_codepage(void)
+unsigned mingw_get_codepage(void)
 {
 	return bb_codepage;
 }
 
-enum bb_codepage_type bb_get_codepage_type(void)
+mingw_codepage_category mingw_get_codepage_category(void)
 {
-	return bb_cp_type;
+	return mingw_cp_type;
 }
 
-unsigned bb_get_codepage_max_charsize(void)
+unsigned mingw_get_codepage_max_charsize(void)
 {
 	return bb_cp_max_charsize;
 }
 
 /* bb_lead_byte_map is zeroed for non-DBCS codepages, so this is safe to
  * call unconditionally regardless of codepage type. */
-bool bb_is_lead_byte(unsigned char c)
+bool mingw_is_lead_byte(unsigned char c)
 {
 	return (bb_lead_byte_map[c >> 3] & (1 << (c & 7))) != 0;
 }
@@ -76,9 +77,9 @@ bool bb_is_lead_byte(unsigned char c)
  * Convert a NUL-terminated multibyte string to wide characters.
  * Tries the caller-provided buffer first; falls back to heap allocation.
  */
-wcs_result bb_to_wcs(const char *s, wchar_t *buf, int buf_bytes)
+mingw_wcs_result_t mingw_to_wcs(const char *s, wchar_t *buf, int buf_bytes)
 {
-	wcs_result r;
+	mingw_wcs_result_t r;
 	int buf_wchars = buf_bytes / sizeof(wchar_t);
 	int n;
 
@@ -119,9 +120,9 @@ wcs_result bb_to_wcs(const char *s, wchar_t *buf, int buf_bytes)
  * Convert a counted multibyte string (slen bytes, not necessarily
  * NUL-terminated) to a NUL-terminated wide string.
  */
-wcs_result bb_to_wcs_n(const char *s, int slen, wchar_t *buf, int buf_bytes)
+mingw_wcs_result_t mingw_to_wcs_n(const char *s, int slen, wchar_t *buf, int buf_bytes)
 {
-	wcs_result r;
+	mingw_wcs_result_t r;
 	int buf_wchars = buf_bytes / sizeof(wchar_t);
 	int n;
 
@@ -181,9 +182,9 @@ wcs_result bb_to_wcs_n(const char *s, int slen, wchar_t *buf, int buf_bytes)
  * Convert a NUL-terminated wide string to multibyte characters.
  * Tries the caller-provided buffer first; falls back to heap allocation.
  */
-mbs_result bb_to_mbs(const wchar_t *ws, char *buf, int buf_bytes)
+mingw_mbs_result_t mingw_to_mbs(const wchar_t *ws, char *buf, int buf_bytes)
 {
-	mbs_result r;
+	mingw_mbs_result_t r;
 	int n;
 
 	/* NULL input: return NULL output */
@@ -224,9 +225,9 @@ mbs_result bb_to_mbs(const wchar_t *ws, char *buf, int buf_bytes)
  * Convert a counted wide string (wlen wchar_t elements, not necessarily
  * NUL-terminated) to a NUL-terminated multibyte string.
  */
-mbs_result bb_to_mbs_n(const wchar_t *ws, int wlen, char *buf, int buf_bytes)
+mingw_mbs_result_t mingw_to_mbs_n(const wchar_t *ws, int wlen, char *buf, int buf_bytes)
 {
-	mbs_result r;
+	mingw_mbs_result_t r;
 	int n;
 
 	/* NULL input with zero length: return NULL output */
@@ -282,13 +283,13 @@ mbs_result bb_to_mbs_n(const wchar_t *ws, int wlen, char *buf, int buf_bytes)
 	return r;
 }
 
-void wcs_free(wcs_result *r)
+void mingw_wcs_free(mingw_wcs_result_t *r)
 {
 	if (r->need_to_free)
 		free(r->str);
 }
 
-void mbs_free(mbs_result *r)
+void mingw_mbs_free(mingw_mbs_result_t *r)
 {
 	if (r->need_to_free)
 		free(r->str);
@@ -309,7 +310,7 @@ char **mingw_encoding_init(wchar_t **wargv)
 	if (GetEnvironmentVariableW(L"BB_CODEPAGE", cpbuf, ARRAY_SIZE(cpbuf))) {
 		unsigned cp = (unsigned)wcstoul(cpbuf, NULL, 10);
 		if (cp > 0)
-			bb_set_codepage(cp);
+			set_codepage(cp);
 	}
 
 	for (argc = 0; wargv[argc] != NULL; argc++)
@@ -318,7 +319,7 @@ char **mingw_encoding_init(wchar_t **wargv)
 	argv = xmalloc(((size_t)argc + 1) * sizeof(char *));
 	for (i = 0; i < argc; i++) {
 		char buf[PATH_MAX];
-		mbs_result r = bb_to_mbs(wargv[i], buf, sizeof(buf));
+		mingw_mbs_result_t r = mingw_to_mbs(wargv[i], buf, sizeof(buf));
 		if (r.need_to_free) {
 			argv[i] = r.str;
 		} else {

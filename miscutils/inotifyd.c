@@ -230,7 +230,7 @@ int inotifyd_main(int argc, char **argv)
 	return bb_got_signal;
 }
 #else /* ENABLE_PLATFORM_MINGW32 */
-#include "strconv.h"
+#include "mingw_encoding.h"
 /*
  * Order is important:  the indices match the values taken by the
  * Action member of the FILE_NOTIFY_INFORMATION structure, including
@@ -275,7 +275,7 @@ static void run_agent(const char *agent, FILE_NOTIFY_INFORMATION *info,
 	char event[2];
 	const char *args[5];
 
-	mbs_result filename = bb_to_mbs_n(info->FileName,
+	mingw_mbs_result_t filename = mingw_to_mbs_n(info->FileName,
 			info->FileNameLength / sizeof(wchar_t),
 			filename_buf, sizeof(filename_buf));
 
@@ -299,7 +299,7 @@ static void run_agent(const char *agent, FILE_NOTIFY_INFORMATION *info,
 			spawn_and_wait((char **)args);
 		}
 	}
-	mbs_free(&filename);
+	mingw_mbs_free(&filename);
 }
 
 static BOOL start_watch(struct watch *w)

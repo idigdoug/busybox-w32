@@ -3210,7 +3210,7 @@ void FAST_FUNC tls_handshake_as_server(tls_state_t *tls,
 
 #include <security.h>
 #include <schannel.h>
-#include "strconv.h"
+#include "mingw_encoding.h"
 
 #ifndef SECBUFFER_ALERT
 # define SECBUFFER_ALERT 17
@@ -3246,12 +3246,12 @@ static SECURITY_STATUS mingw_InitializeSecurityContext(
 		ULONG *context_attr, PTimeStamp expiry)
 {
 	wchar_t wname_buf[256];
-	wcs_result wr_name = bb_to_wcs(target_name, wname_buf, sizeof(wname_buf));
+	mingw_wcs_result_t wr_name = mingw_to_wcs(target_name, wname_buf, sizeof(wname_buf));
 	SECURITY_STATUS status = InitializeSecurityContextW(
 			cred_handle, ctx_handle, wr_name.str, context_req,
 			reserved1, target_data_rep, input, reserved2,
 			new_ctx_handle, output, context_attr, expiry);
-	wcs_free(&wr_name);
+	mingw_wcs_free(&wr_name);
 	return status;
 }
 

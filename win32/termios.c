@@ -1,5 +1,5 @@
 #include "libbb.h"
-#include "strconv.h"
+#include "mingw_encoding.h"
 
 int FAST_FUNC
 tcsetattr(int fd, int mode UNUSED_PARAM, const struct termios *t)
@@ -224,7 +224,7 @@ int FAST_FUNC windows_codepoint_to_mbs(uint32_t codepoint, char *buf, int buf_by
 {
 	WCHAR wbuf[3];
 	int wlen;
-	mbs_result r;
+	mingw_mbs_result_t r;
 	int len;
 
 	if (codepoint > 0xFFFF) {
@@ -238,7 +238,7 @@ int FAST_FUNC windows_codepoint_to_mbs(uint32_t codepoint, char *buf, int buf_by
 		wlen = 1;
 	}
 
-	r = bb_to_mbs_n(wbuf, wlen, buf, buf_bytes);
+	r = mingw_to_mbs_n(wbuf, wlen, buf, buf_bytes);
 	if (r.str == NULL)
 		return 0;
 	len = strlen(r.str);
@@ -249,7 +249,7 @@ int FAST_FUNC windows_codepoint_to_mbs(uint32_t codepoint, char *buf, int buf_by
 		} else {
 			len = 0; /* doesn't fit */
 		}
-		mbs_free(&r);
+		mingw_mbs_free(&r);
 	}
 	return len;
 }

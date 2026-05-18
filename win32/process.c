@@ -2,7 +2,7 @@
 #include <tlhelp32.h>
 #include <psapi.h>
 #include "lazyload.h"
-#include "strconv.h"
+#include "mingw_encoding.h"
 #include "NUM_APPLETS.h"
 
 #ifndef ERROR_ELEVATION_REQUIRED
@@ -170,7 +170,7 @@ static wchar_t **build_wide_argv(char *const *argv)
 	argc = string_array_len((char **)argv);
 	wargv = xmalloc(((size_t)argc + 1) * sizeof(wchar_t *));
 	for (i = 0; i < argc; i++) {
-		wcs_result wr = bb_to_wcs(argv[i], NULL, 0);
+		mingw_wcs_result_t wr = mingw_to_wcs(argv[i], NULL, 0);
 		wargv[i] = wr.str;
 	}
 	wargv[argc] = NULL;
@@ -190,7 +190,7 @@ static wchar_t **build_wide_env(char *const *env)
 	count = string_array_len((char **)env);
 	wenv = xmalloc(((size_t)count + 1) * sizeof(wchar_t *));
 	for (i = 0; i < count; i++) {
-		wcs_result wr = bb_to_wcs(env[i], NULL, 0);
+		mingw_wcs_result_t wr = mingw_to_wcs(env[i], NULL, 0);
 		wenv[i] = wr.str;
 	}
 	wenv[count] = NULL;
@@ -208,7 +208,7 @@ spawnveq(int mode, const char *path, char *const *argv, char *const *env)
 	size_t len = 0;
 	const char *final_path;
 	wchar_t wpath_buf[PATH_MAX];
-	wcs_result wr_path = {0};
+	mingw_wcs_result_t wr_path = {0};
 	wchar_t **wargv = NULL;
 	wchar_t **wenv = NULL;
 
@@ -254,7 +254,7 @@ spawnveq(int mode, const char *path, char *const *argv, char *const *env)
 	final_path = new_path ? new_path : path;
 
 	/* Convert path and argv to wide */
-	wr_path = bb_to_wcs(final_path, wpath_buf, sizeof(wpath_buf));
+	wr_path = mingw_to_wcs(final_path, wpath_buf, sizeof(wpath_buf));
 	wargv = build_wide_argv((char *const *)new_argv);
 
 	/*
@@ -271,7 +271,7 @@ spawnveq(int mode, const char *path, char *const *argv, char *const *env)
 		errno = E2BIG;
 
  done:
-	wcs_free(&wr_path);
+	mingw_wcs_free(&wr_path);
 	if (wargv) {
 		for (i = 0; wargv[i]; i++)
 			free(wargv[i]);
@@ -321,7 +321,7 @@ create_detached_process(const char *prog, char *const *argv)
 	PROCESS_INFORMATION piProcInfo;
 	int success;
 	wchar_t wprog_buf[PATH_MAX];
-	wcs_result wr_prog, wr_cmd;
+	mingw_wcs_result_t wr_prog, wr_cmd;
 
 	argc = string_array_len((char **)argv);
 	for (i = 0; i < argc; i++) {
@@ -337,8 +337,8 @@ create_detached_process(const char *prog, char *const *argv)
 	siStartInfo.hStdOutput = (HANDLE)_get_osfhandle(STDOUT_FILENO);
 	siStartInfo.dwFlags = STARTF_USESTDHANDLES;
 
-	wr_prog = bb_to_wcs(prog, wprog_buf, sizeof(wprog_buf));
-	wr_cmd = bb_to_wcs(command, NULL, 0);
+	wr_prog = mingw_to_wcs(prog, wprog_buf, sizeof(wprog_buf));
+	wr_cmd = mingw_to_wcs(command, NULL, 0);
 
 	success = CreateProcessW(wr_prog.str,
 				wr_cmd.str,        /* command line (mutable) */
@@ -351,8 +351,8 @@ create_detached_process(const char *prog, char *const *argv)
 				&siStartInfo,      /* STARTUPINFO pointer */
 				&piProcInfo);      /* receives PROCESS_INFORMATION */
 
-	wcs_free(&wr_cmd);
-	wcs_free(&wr_prog);
+	mingw_wcs_free(&wr_cmd);
+	mingw_wcs_free(&wr_prog);
 	if (ENABLE_FEATURE_CLEAN_UP)
 		free(command);
 
