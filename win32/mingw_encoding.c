@@ -27,7 +27,7 @@ static void set_codepage(unsigned cp)
 		return;
 	}
 
-	if (!GetCPInfo(cp, &info)) {
+	if (!GetCPInfo(cp, &info) || info.MaxCharSize > MINGW_MAX_CHARSIZE) {
 		bb_error_msg("codepage %u is not supported, keeping %u",
 				cp, bb_codepage);
 		return;
@@ -293,6 +293,172 @@ void mingw_mbs_free(mingw_mbs_result_t *r)
 {
 	if (r->need_to_free)
 		free(r->str);
+}
+
+/*
+ * Decode one character from *src using the current codepage.
+ * Advances *src past the decoded bytes.
+ * Returns the Unicode codepoint, 0 for end-of-string, or (uint32_t)-1 for
+ * invalid sequences.
+ */
+uint32_t mingw_mbrtowc(const char **src)
+{
+	const unsigned char *s = (const unsigned char *)*src;
+	unsigned char c = *s;
+
+	if (c == 0) {
+		return 0;
+	}
+
+	switch (mingw_cp_type) {
+	case MINGW_CODEPAGE_UTF8: {
+		/* Fast inline UTF-8 decoder */
+		uint32_t v;
+		int bytes;
+
+		if (c <= 0x7f) {
+			*src = (const char *)s + 1;
+			return c;
+		}
+		if ((c & 0xe0) == 0xc0) {
+			bytes = 2; v = c & 0x1f;
+		} else if ((c & 0xf0) == 0xe0) {
+			bytes = 3; v = c & 0x0f;
+		} else if ((c & 0xf8) == 0xf0) {
+			bytes = 4; v = c & 0x07;
+		} else {
+			/* Invalid lead byte */
+			*src = (const char *)s + 1;
+			return (uint32_t)-1;
+		}
+		for (int i = 1; i < bytes; i++) {
+			if ((s[i] & 0xc0) != 0x80) {
+				/* Truncated sequence */
+				*src = (const char *)s + 1;
+				return (uint32_t)-1;
+			}
+			v = (v << 6) | (s[i] & 0x3f);
+		}
+		/* Reject overlong encodings */
+		if (v <= 0x7f || (bytes == 3 && v <= 0x7ff) ||
+		    (bytes == 4 && v <= 0xffff)) {
+			*src = (const char *)s + 1;
+			return (uint32_t)-1;
+		}
+		*src = (const char *)s + bytes;
+		return v;
+	}
+
+	case MINGW_CODEPAGE_SBCS: {
+		/* Single byte: use MultiByteToWideChar for the mapping */
+		wchar_t wc;
+		char mb[1] = { (char)c };
+		if (MultiByteToWideChar(bb_codepage, 0, mb, 1, &wc, 1) == 1) {
+			*src = (const char *)s + 1;
+			return (uint32_t)wc;
+		}
+		*src = (const char *)s + 1;
+		return (uint32_t)-1;
+	}
+
+	case MINGW_CODEPAGE_DBCS: {
+		/* Check if lead byte; if so, consume two bytes */
+		int len = mingw_is_lead_byte(c) ? 2 : 1;
+		wchar_t wc;
+		if (s[0] && (len == 1 || s[1])) {
+			if (MultiByteToWideChar(bb_codepage, 0, (const char *)s, len, &wc, 1) == 1) {
+				*src = (const char *)s + len;
+				return (uint32_t)wc;
+			}
+		}
+		*src = (const char *)s + 1;
+		return (uint32_t)-1;
+	}
+
+	default: /* MINGW_CODEPAGE_OTHER */
+	{
+		/* Try 1..max_charsize bytes until we get a valid conversion */
+		wchar_t wbuf[2]; /* may produce surrogate pair */
+		for (unsigned len = 1; len <= bb_cp_max_charsize; len++) {
+			if (s[len - 1] == 0 && len > 1)
+				break; /* don't read past NUL */
+			int rc = MultiByteToWideChar(bb_codepage, MB_ERR_INVALID_CHARS,
+					(const char *)s, len, wbuf, 2);
+			if (rc >= 1) {
+				uint32_t cp = wbuf[0];
+				/* Handle surrogate pair */
+				if (rc == 2 && (wbuf[0] & 0xFC00) == 0xD800) {
+					cp = 0x10000 + ((wbuf[0] & 0x3FF) << 10)
+					             + (wbuf[1] & 0x3FF);
+				}
+				*src = (const char *)s + len;
+				return cp;
+			}
+		}
+		*src = (const char *)s + 1;
+		return (uint32_t)-1;
+	}
+	}
+}
+
+/*
+ * Encode a Unicode codepoint to multibyte using the current codepage.
+ * Returns the number of bytes written to buf.
+ * Returns 0 on failure (codepoint cannot be represented).
+ */
+int mingw_wcrtomb(char *buf, uint32_t codepoint)
+{
+	if (codepoint == 0) {
+		buf[0] = '\0';
+		return 1;
+	}
+
+	if (mingw_cp_type == MINGW_CODEPAGE_UTF8) {
+		/* Fast inline UTF-8 encoder */
+		if (codepoint <= 0x7f) {
+			buf[0] = (char)codepoint;
+			return 1;
+		}
+		if (codepoint <= 0x7ff) {
+			buf[0] = 0xc0 | (codepoint >> 6);
+			buf[1] = 0x80 | (codepoint & 0x3f);
+			return 2;
+		}
+		if (codepoint <= 0xffff) {
+			buf[0] = 0xe0 | (codepoint >> 12);
+			buf[1] = 0x80 | ((codepoint >> 6) & 0x3f);
+			buf[2] = 0x80 | (codepoint & 0x3f);
+			return 3;
+		}
+		if (codepoint <= 0x10ffff) {
+			buf[0] = 0xf0 | (codepoint >> 18);
+			buf[1] = 0x80 | ((codepoint >> 12) & 0x3f);
+			buf[2] = 0x80 | ((codepoint >> 6) & 0x3f);
+			buf[3] = 0x80 | (codepoint & 0x3f);
+			return 4;
+		}
+		return 0;
+	}
+
+	/* For SBCS/DBCS/OTHER: convert via WideCharToMultiByte */
+	wchar_t wbuf[2];
+	int wlen;
+	if (codepoint <= 0xffff) {
+		wbuf[0] = (wchar_t)codepoint;
+		wlen = 1;
+	} else if (codepoint <= 0x10ffff) {
+		/* Encode as surrogate pair */
+		codepoint -= 0x10000;
+		wbuf[0] = 0xD800 | (codepoint >> 10);
+		wbuf[1] = 0xDC00 | (codepoint & 0x3FF);
+		wlen = 2;
+	} else {
+		return 0;
+	}
+
+	int rc = WideCharToMultiByte(bb_codepage, 0, wbuf, wlen,
+			buf, 6, NULL, NULL);
+	return rc > 0 ? rc : 0;
 }
 
 /*

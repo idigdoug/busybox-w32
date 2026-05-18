@@ -2,8 +2,18 @@
 #ifndef WIN32_MINGW_ENCODING_H
 #define WIN32_MINGW_ENCODING_H
 
+/* This header uses the real wchar_t (16-bit on Windows). It must be included
+ * before unicode.h, which redefines wchar_t to uint32_t. */
+#ifdef wchar_t
+# error "mingw_encoding.h must be included before wchar_t is redefined"
+#endif
+
 #include <stdbool.h>
+#include <stdint.h>
 #include <wchar.h>
+
+/* Maximum bytes per character for any supported codepage. */
+#define MINGW_MAX_CHARSIZE 6
 
 /*
  * String conversion between multibyte (char) and wide character (wchar_t)
@@ -107,5 +117,21 @@ void mingw_wcs_free(mingw_wcs_result_t *r);
  *  Frees the buffer returned by mingw_to_mbs or mingw_to_mbs_n as necessary.
  */
 void mingw_mbs_free(mingw_mbs_result_t *r);
+
+/*
+ * Decode one character from 'src' using the current codepage.
+ * Returns the Unicode codepoint (as uint32_t) and advances *src past the
+ * consumed bytes.  Returns 0 for NUL, (uint32_t)-1 for invalid sequences
+ * (advancing past the bad byte).
+ */
+uint32_t mingw_mbrtowc(const char **src);
+
+/*
+ * Encode one Unicode codepoint to multibyte using the current codepage.
+ * Writes to 'buf' (which must have room for at least
+ * mingw_get_codepage_max_charsize() bytes, or MINGW_MAX_CHARSIZE for safety).
+ * Returns the number of bytes written, or 0 on failure.
+ */
+int mingw_wcrtomb(char *buf, uint32_t codepoint);
 
 #endif /* WIN32_MINGW_ENCODING_H */

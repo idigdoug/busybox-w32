@@ -202,7 +202,7 @@ int drop_main(int argc UNUSED_PARAM, char **argv)
 			setenv_name("LOGNAME");
 
 			if (!mingw_CreateProcessAsUser(token, exe, cmd, NULL, NULL, TRUE,
-                        0, NULL, NULL, &si, &pi)) {
+						0, NULL, NULL, &si, &pi)) {
 				xfunc_error_retval = 126;
 				bb_error_msg_and_die("can't execute '%s'", exe);
 			}

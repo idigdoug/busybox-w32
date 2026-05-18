@@ -928,7 +928,7 @@ int busybox_main(int argc UNUSED_PARAM, char **argv)
 		}
 #   endif
 		full_write1_str(ENABLE_GLOBBING ? "glob" : "noglob");
-#   if ENABLE_FEATURE_UTF8_MANIFEST
+#   if ENABLE_UNICODE_SUPPORT
 		full_write1_str("; Unicode");
 #   endif
 		full_write1_str(")\n\n");

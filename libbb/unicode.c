@@ -7,6 +7,9 @@
  * Licensed under GPLv2, see file LICENSE in this source tree.
  */
 #include "libbb.h"
+#if ENABLE_PLATFORM_MINGW32
+#include "mingw_encoding.h"
+#endif
 #include "unicode.h"
 
 /* If it's not #defined as a constant in unicode.h... */
@@ -65,18 +68,12 @@ void FAST_FUNC init_unicode(void)
 
 /* Homegrown Unicode support. It knows only C and Unicode locales. */
 
-# if ENABLE_FEATURE_CHECK_UNICODE_IN_ENV
+# if ENABLE_FEATURE_CHECK_UNICODE_IN_ENV && !ENABLE_PLATFORM_MINGW32
 void FAST_FUNC reinit_unicode(const char *LANG)
 {
 	unicode_status = UNICODE_OFF;
-#if ENABLE_PLATFORM_MINGW32
-	/* enable unicode only when ACP is UTF8 and the env var is not 'C' */
-	if (GetACP() != CP_UTF8 || (LANG && LANG[0] == 'C' && LANG[1] == 0))
-		return;
-#else
 	if (!LANG || !(strstr(LANG, ".utf") || strstr(LANG, ".UTF")))
 		return;
-#endif
 	unicode_status = UNICODE_ON;
 }
 
@@ -90,6 +87,25 @@ void FAST_FUNC init_unicode(void)
 	}
 }
 # endif
+
+#define ERROR_WCHAR (~(wchar_t)0)
+
+#if ENABLE_PLATFORM_MINGW32
+
+/* MinGW path: codepage-aware using mingw_encoding helpers */
+
+static size_t wcrtomb_internal(char *s, wchar_t wc)
+{
+	return mingw_wcrtomb(s, (uint32_t)wc);
+}
+
+static const char *mbstowc_internal(wchar_t *res, const char *src)
+{
+	*res = (wchar_t)mingw_mbrtowc(&src);
+	return src;
+}
+
+#else /* !ENABLE_PLATFORM_MINGW32 */
 
 static size_t wcrtomb_internal(char *s, wchar_t wc)
 {
@@ -127,56 +143,6 @@ static size_t wcrtomb_internal(char *s, wchar_t wc)
 	s[0] = wc | (uint8_t)(0x3f00 >> n);
 	return n;
 }
-size_t FAST_FUNC wcrtomb(char *s, wchar_t wc, mbstate_t *ps UNUSED_PARAM)
-{
-	if (unicode_status != UNICODE_ON) {
-		*s = wc;
-		return 1;
-	}
-
-	return wcrtomb_internal(s, wc);
-}
-size_t FAST_FUNC wcstombs(char *dest, const wchar_t *src, size_t n)
-{
-	size_t org_n = n;
-
-	if (unicode_status != UNICODE_ON) {
-		while (n) {
-			wchar_t c = *src++;
-			*dest++ = c;
-			if (c == 0)
-				break;
-			n--;
-		}
-		return org_n - n;
-	}
-
-	while (n >= MB_CUR_MAX) {
-		wchar_t wc = *src++;
-		size_t len = wcrtomb_internal(dest, wc);
-
-		if (wc == L'\0')
-			return org_n - n;
-		dest += len;
-		n -= len;
-	}
-	while (n) {
-		char tbuf[MB_CUR_MAX];
-		wchar_t wc = *src++;
-		size_t len = wcrtomb_internal(tbuf, wc);
-
-		if (len > n)
-			break;
-		memcpy(dest, tbuf, len);
-		if (wc == L'\0')
-			return org_n - n;
-		dest += len;
-		n -= len;
-	}
-	return org_n - n;
-}
-
-# define ERROR_WCHAR (~(wchar_t)0)
 
 static const char *mbstowc_internal(wchar_t *res, const char *src)
 {
@@ -229,6 +195,57 @@ static const char *mbstowc_internal(wchar_t *res, const char *src)
 	*res = c;
 	return src;
 }
+#endif /* !ENABLE_PLATFORM_MINGW32 */
+
+size_t FAST_FUNC wcrtomb(char *s, wchar_t wc, mbstate_t *ps UNUSED_PARAM)
+{
+	if (unicode_status != UNICODE_ON) {
+		*s = wc;
+		return 1;
+	}
+
+	return wcrtomb_internal(s, wc);
+}
+size_t FAST_FUNC wcstombs(char *dest, const wchar_t *src, size_t n)
+{
+	size_t org_n = n;
+
+	if (unicode_status != UNICODE_ON) {
+		while (n) {
+			wchar_t c = *src++;
+			*dest++ = c;
+			if (c == 0)
+				break;
+			n--;
+		}
+		return org_n - n;
+	}
+
+	while (n >= MB_CUR_MAX) {
+		wchar_t wc = *src++;
+		size_t len = wcrtomb_internal(dest, wc);
+
+		if (wc == L'\0')
+			return org_n - n;
+		dest += len;
+		n -= len;
+	}
+	while (n) {
+		char tbuf[MB_CUR_MAX];
+		wchar_t wc = *src++;
+		size_t len = wcrtomb_internal(tbuf, wc);
+
+		if (len > n)
+			break;
+		memcpy(dest, tbuf, len);
+		if (wc == L'\0')
+			return org_n - n;
+		dest += len;
+		n -= len;
+	}
+	return org_n - n;
+}
+
 size_t FAST_FUNC mbstowcs(wchar_t *dest, const char *src, size_t n)
 {
 	size_t org_n = n;
@@ -1028,15 +1045,6 @@ static char* FAST_FUNC unicode_conv_to_printable2(uni_stat_t *stats, const char 
 	unsigned uni_count;
 	unsigned uni_width;
 
-#if ENABLE_PLATFORM_MINGW32
-	static int acp;  /* =0 */
-	if (!acp)
-		acp = GetACP();
-/* without unicode ACP, >127 are also printable */
-#define isprint_no_unicode_mingw(c) (((c) >= ' ' && (c) < 0x7f) || \
-                                     (acp != CP_UTF8 && (c) > 0x7f))
-#endif
-
 	if (unicode_status != UNICODE_ON) {
 		char *d;
 		if (flags & UNI_FLAG_PAD) {
@@ -1049,11 +1057,7 @@ static char* FAST_FUNC unicode_conv_to_printable2(uni_stat_t *stats, const char 
 					while ((int)--width >= 0);
 					break;
 				}
-#if ENABLE_PLATFORM_MINGW32
-				*d++ = isprint_no_unicode_mingw(c) ? c : '?';
-#else
 				*d++ = (c >= ' ' && c < 0x7f) ? c : '?';
-#endif
 				src++;
 			}
 			*d = '\0';
@@ -1061,13 +1065,8 @@ static char* FAST_FUNC unicode_conv_to_printable2(uni_stat_t *stats, const char 
 			d = dst = xstrndup(src, width);
 			while (*d) {
 				unsigned char c = *d;
-#if ENABLE_PLATFORM_MINGW32
-				if (!isprint_no_unicode_mingw(c))
-					*d = '?';
-#else
 				if (c < ' ' || c >= 0x7f)
 					*d = '?';
-#endif
 				d++;
 			}
 		}

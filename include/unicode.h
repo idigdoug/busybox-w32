@@ -78,7 +78,7 @@ void reinit_unicode(const char *LANG) FAST_FUNC;
 
 /* Homegrown Unicode support. It knows only C and Unicode locales. */
 
-#  if !ENABLE_FEATURE_CHECK_UNICODE_IN_ENV
+#  if !ENABLE_FEATURE_CHECK_UNICODE_IN_ENV || ENABLE_PLATFORM_MINGW32
 #   define unicode_status UNICODE_ON
 #   define init_unicode() ((void)0)
 #   define reinit_unicode(LANG) ((void)0)
